@@ -234,7 +234,7 @@ export function MusicPlayer() {
 
   const playlistCountLabel = useMemo(() => `${tracks.length} 首歌曲`, [tracks.length])
 
-  const playTrackWhenReady = (audio: HTMLAudioElement) => {
+  const playTrackWhenReady = (audio: HTMLAudioElement, background = false) => {
     const startPlayback = () => {
       audio.removeEventListener('canplay', startPlayback)
       audio.play().then(() => {
@@ -243,6 +243,22 @@ export function MusicPlayer() {
         setIsPlaying(false)
         setMessage('手機瀏覽器阻擋自動播放，請先點擊播放鍵一次。')
       })
+    }
+
+    // iOS may suspend the page after it is backgrounded and never deliver a
+    // canplay callback until the app returns to the foreground. Calling play
+    // immediately on the same, user-authorized audio element lets the native
+    // media session continue loading the next file in the background.
+    if (background) {
+      audio.autoplay = true
+      audio.play().then(() => {
+        setIsPlaying(true)
+      }).catch(() => {
+        // autoplay remains enabled so iOS can start playback as soon as the
+        // source finishes loading; a later visibility change retries it.
+        setIsPlaying(false)
+      })
+      return
     }
 
     if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
@@ -278,7 +294,7 @@ export function MusicPlayer() {
     }
     setCurrentIndex(nextIndex)
     setIsPlaying(autoplay)
-    if (autoplay && audio) playTrackWhenReady(audio)
+    if (autoplay && audio) playTrackWhenReady(audio, document.hidden)
   }
 
   const previousTrack = () => {
@@ -313,14 +329,24 @@ export function MusicPlayer() {
 
   useEffect(() => {
     const continueInBackground = () => {
-      if (!document.hidden || nextTimerRef.current === null) return
-      window.clearTimeout(nextTimerRef.current)
-      nextTimerRef.current = null
-      nextTrack(true)
+      const audio = audioRef.current
+      if (document.hidden) {
+        // Retry the native media session when the browser changes visibility;
+        // this is intentionally not timer-based because iOS suspends timers.
+        if (audio && isPlaying && audio.paused && !audio.ended) {
+          audio.play().catch(() => undefined)
+        }
+        return
+      }
+      if (nextTimerRef.current !== null) {
+        window.clearTimeout(nextTimerRef.current)
+        nextTimerRef.current = null
+        nextTrack(true)
+      }
     }
     document.addEventListener('visibilitychange', continueInBackground)
     return () => document.removeEventListener('visibilitychange', continueInBackground)
-  }, [currentIndex, playMode, tracks])
+  }, [currentIndex, playMode, tracks, isPlaying])
 
   const chooseTrack = (index: number) => {
     if (nextTimerRef.current !== null) {
