@@ -504,16 +504,30 @@ function StudyView({ game, selectedSubject, setSelectedSubject, showTimer, setSh
   const weekStart = new Date(now)
   weekStart.setHours(0, 0, 0, 0)
   weekStart.setDate(now.getDate() - ((now.getDay() + 6) % 7))
-  const weekMinutes = Array.from({ length: 7 }, (_, index) => {
+  const weekDays = Array.from({ length: 7 }, (_, index) => {
     const day = new Date(weekStart)
     day.setDate(weekStart.getDate() + index)
-    const key = dateKey(day)
-    return game.sessions.filter((session) => dateKey(new Date(session.completedAt)) === key).reduce((sum, session) => sum + session.minutes, 0)
+    return day
   })
+  const weekEnd = weekDays[6]
+  const weekSessionRows = game.sessions.filter((session) => {
+    const completedAt = new Date(session.completedAt)
+    return completedAt >= weekStart && completedAt < new Date(weekEnd.getFullYear(), weekEnd.getMonth(), weekEnd.getDate() + 1)
+  })
+  const subjectTotals = weekSessionRows.reduce<Record<string, number>>((totals, session) => { totals[session.subject] = (totals[session.subject] ?? 0) + session.minutes; return totals }, {})
+  const weekSubjects = Object.keys(subjectTotals).sort((a, b) => subjectTotals[b] - subjectTotals[a])
+  const subjectPalette = ['#79b7aa', '#d8ad61', '#9c9bd0', '#df9f8a', '#80a6c5', '#a4bb78', '#c68bb0', '#91a9a2']
+  const subjectColors = new Map(weekSubjects.map((subject, index) => [subject, subjectPalette[index % subjectPalette.length]]))
+  const weekSubjectMinutes = weekDays.map((day) => {
+    const key = dateKey(day)
+    return weekSubjects.map((subject) => ({ subject, minutes: weekSessionRows.filter((session) => session.subject === subject && dateKey(new Date(session.completedAt)) === key).reduce((sum, session) => sum + session.minutes, 0) })).filter((item) => item.minutes > 0)
+  })
+  const weekMinutes = weekSubjectMinutes.map((segments) => segments.reduce((sum, segment) => sum + segment.minutes, 0))
   const weekTotal = weekMinutes.reduce((sum, minutes) => sum + minutes, 0)
   const weekGoal = game.dailyGoal * 7
   const weekPercent = Math.min(weekTotal / Math.max(weekGoal, 1) * 100, 100)
   const completedDays = weekMinutes.filter((minutes) => minutes >= game.dailyGoal).length
+  const chartScale = Math.max(game.dailyGoal, ...weekMinutes, 1)
   const [showAddTask, setShowAddTask] = useState(false)
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskSubject, setNewTaskSubject] = useState(game.subjects[0]?.name ?? '')
@@ -535,9 +549,10 @@ function StudyView({ game, selectedSubject, setSelectedSubject, showTimer, setSh
     <div className="study-layout">
       <section className="card study-overview">
         <div className="card-heading"><div><span className="eyebrow">本週修煉紀錄</span><h2>循序漸進，自有所得</h2></div><span className="week-total">{weekTotal} / {weekGoal} 分鐘</span></div>
-        <div className="week-bars">{weekMinutes.map((minutes, index) => { const day = new Date(weekStart); day.setDate(weekStart.getDate() + index); const height = Math.min(minutes / Math.max(game.dailyGoal, 1) * 100, 100); const isToday = dateKey(day) === dateKey(new Date()); return <div className={`week-bar ${isToday ? 'today' : ''}`} key={dateKey(day)} title={`${dateKey(day)}：${minutes} 分鐘`}><div className="bar-track"><span style={{ height: `${height}%` }} /></div><small>{dayLabels[day.getDay()]}</small><em>{minutes}分</em></div> })}</div>
+        <div className="week-bars">{weekDays.map((day, index) => { const minutes = weekMinutes[index]; const segments = weekSubjectMinutes[index]; const height = Math.min(minutes / chartScale * 100, 100); const isToday = dateKey(day) === dateKey(new Date()); return <div className={`week-bar ${isToday ? 'today' : ''}`} key={dateKey(day)} title={`${dateKey(day)}：${minutes} 分鐘`}><div className="bar-track"><div className="week-stack" style={{ height: `${height}%` }}>{segments.map((segment) => <span className="week-segment" key={segment.subject} style={{ height: `${segment.minutes / Math.max(minutes, 1) * 100}%`, background: subjectColors.get(segment.subject) }} title={`${segment.subject}：${segment.minutes} 分鐘`} />)}</div></div><small>{dayLabels[day.getDay()]}</small><em>{minutes}分</em></div> })}</div>
         <div className="weekly-progress-summary"><div><small>本週目標完成度</small><strong>{Math.round(weekPercent)}%</strong></div><div><small>達成每日目標</small><strong>{completedDays} / 7 天</strong></div><div className="weekly-progress-track"><span style={{ width: `${weekPercent}%` }} /></div></div>
         <div className="study-legend"><span><i className="legend-dot mint" />每日實際專注</span><span>每日目標 {game.dailyGoal} 分鐘</span></div>
+        {weekSubjects.length > 0 ? <div className="subject-legend"><small>本週科目顏色</small><div>{weekSubjects.map((subject) => <span key={subject}><i style={{ background: subjectColors.get(subject) }} />{subject} · {subjectTotals[subject]}分</span>)}</div></div> : <div className="week-empty"><span>✦</span><p>本週還沒有讀書紀錄，開始一次專注就會在這裡看到科目分布。</p></div>}
       </section>
       <section className="card task-card">
         <div className="card-heading"><div><span className="eyebrow">修煉功課</span><h2>今日任務</h2></div><div className="task-card-actions"><button className="text-button" onClick={() => setShowAddTask((current) => !current)}>＋ 新增任務</button><button className="text-button" onClick={() => setShowAddSubject(!showAddSubject)}>＋ 自訂科目</button></div></div>
@@ -547,7 +562,7 @@ function StudyView({ game, selectedSubject, setSelectedSubject, showTimer, setSh
         <div className="filter-row">{filterSubjects.map((item) => <button key={item} className={filter === item ? 'active' : ''} onClick={() => setFilter(item)}>{item}</button>)}</div>
         <div className="task-list">{tasks.length === 0 ? <p className="task-empty">今天還沒有任務，按右上角「新增任務」開始安排。</p> : tasks.map((task) => { const progress = Math.min(task.progressMinutes ?? (task.completed ? task.targetMinutes : 0), task.targetMinutes); const ready = progress >= task.targetMinutes; return <div className={`task-item ${task.completed ? 'completed' : ''}`} key={task.id}><span className="check-circle">{task.completed ? '✓' : ready ? '✦' : ''}</span><span className="task-copy"><strong>{task.title}</strong><small>{task.subject} · {progress} / {task.targetMinutes} 分鐘</small><span className="study-task-track"><span style={{ width: `${progress / task.targetMinutes * 100}%` }} /></span></span><span className="task-actions"><button className="task-confirm-button" type="button" disabled={!ready || task.completed} onClick={() => onConfirmTask(task.id)}>{task.completed ? '已確認' : ready ? '確認達成' : '讀書累積'}</button><button className="task-delete-button" type="button" onClick={() => onDeleteTask(task.id)} aria-label={`刪除任務 ${task.title}`}>刪除</button></span></div> })}</div>
       </section>
-      <section className="card history-card"><div className="card-heading"><div><span className="eyebrow">最近入定</span><h2>學習紀錄</h2></div><span className="history-count">{game.sessions.length} 次</span></div><div className="history-list">{[...game.sessions].reverse().slice(0, 5).map((session) => <div className="history-item" key={session.id}><span className="history-icon">✧</span><div><strong>{session.subject}專注修煉</strong><small>{session.difficulty} · {session.quality} · {new Date(session.completedAt).toLocaleDateString('zh-TW', { month: 'short', day: 'numeric' })}</small></div><b>+{session.rewardExp ?? session.minutes * 10} 修為</b></div>)}</div></section>
+      <section className="card history-card"><div className="card-heading"><div><span className="eyebrow">最近入定</span><h2>學習紀錄</h2></div><span className="history-count">{game.sessions.length} 次</span></div>{game.sessions.length === 0 ? <div className="history-empty"><span>◌</span><p>完成第一次伴讀後，這裡會保留最近的學習足跡。</p><button className="soft-button" onClick={() => setShowTimer(true)}>開始第一次專注</button></div> : <div className="history-list">{[...game.sessions].reverse().slice(0, 5).map((session) => <div className="history-item" key={session.id}><span className="history-icon">✧</span><div><strong>{session.subject}專注修煉</strong><small>{session.difficulty} · {session.quality} · {new Date(session.completedAt).toLocaleDateString('zh-TW', { month: 'short', day: 'numeric' })}</small></div><b>+{session.rewardExp ?? session.minutes * 10} 修為</b></div>)}</div>}</section>
     </div>
     {showTimer && <div className="modal-backdrop"><div className="timer-modal"><button className="modal-close" onClick={() => setShowTimer(false)}>×</button><StudyTimer subject={selectedSubject} subjectCatalog={game.subjects} onSubjectChange={setSelectedSubject} onComplete={onComplete} onCancel={() => setShowTimer(false)} /></div></div>}
   </>

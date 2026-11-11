@@ -32,6 +32,79 @@
 .subject-track { height: 5px; overflow: hidden; border-radius: 99px; background: #e9eee8; }
 .subject-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #9ccfbe, #d9b976); }
 .statistics-empty { margin: 6px 0 0; color: #a5afa9; font-size: 9px; }
+.bar-track { position: relative; }
+.week-stack {
+  display: flex;
+  width: 100%;
+  min-height: 2px;
+  flex-direction: column-reverse;
+  overflow: hidden;
+  border-radius: inherit;
+}
+.week-segment {
+  display: block;
+  width: 100%;
+  min-height: 2px;
+  transition: filter .2s ease;
+}
+.week-segment:hover { filter: brightness(1.08); }
+.subject-legend {
+  margin-top: 13px;
+  padding-top: 11px;
+  border-top: 1px solid #efebe4;
+}
+.subject-legend > small {
+  display: block;
+  margin-bottom: 7px;
+  color: #9da9a3;
+  font-size: 9px;
+}
+.subject-legend > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  max-height: 58px;
+  overflow-y: auto;
+}
+.subject-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #899a92;
+  font-size: 9px;
+}
+.subject-legend i {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 3px;
+}
+.week-empty,
+.history-empty {
+  display: grid;
+  place-items: center;
+  margin-top: 14px;
+  padding: 14px 8px;
+  border: 1px dashed #dfe9e1;
+  border-radius: 10px;
+  color: #a4afa9;
+  text-align: center;
+}
+.week-empty span,
+.history-empty > span {
+  color: #d4b16d;
+  font-size: 20px;
+}
+.week-empty p,
+.history-empty p {
+  margin: 5px 0 0;
+  font-size: 9px;
+  line-height: 1.6;
+}
+.history-empty .soft-button {
+  margin-top: 8px;
+  padding: 7px 10px;
+}
 .card, .primary-button, .secondary-button, .soft-button, .nav-item, .collection-item, .achievement-item, .daily-task, .road-item { transition: transform .22s ease, box-shadow .22s ease, border-color .22s ease, background-color .22s ease; }
 .card:hover { box-shadow: 0 18px 40px rgba(81, 95, 94, .11); }
 .collection-item:hover, .achievement-item:hover, .daily-task:hover { transform: translateY(-2px); }
