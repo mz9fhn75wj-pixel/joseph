@@ -108,6 +108,10 @@ export function MusicPlayer() {
   const audioRef = useRef<HTMLAudioElement>(null)
   const nextTimerRef = useRef<number | null>(null)
   const audioRecoveryRef = useRef(false)
+  // Keep the user's intention separate from the browser's transient playback
+  // state. iOS can emit a pause event while Safari is moving to the
+  // background, even though the user never asked the music to stop.
+  const playbackIntentRef = useRef(false)
   const libraryLoadRef = useRef(0)
   const settingsTimerRef = useRef<number | null>(null)
   const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null)
@@ -282,11 +286,15 @@ export function MusicPlayer() {
       : (currentIndex + 1) % tracks.length
 
     const audio = audioRef.current
+    playbackIntentRef.current = autoplay
     if (audio) {
       // Keep the same audio element so iOS keeps the playback permission granted
       // by the user's first tap. autoplay is only enabled for an actual advance.
       audioRecoveryRef.current = false
-      audio.pause()
+      // Do not explicitly pause an already-playing element when advancing in
+      // the background. On iOS that extra pause can end the native media
+      // session before the replacement source is ready.
+      if (!autoplay) audio.pause()
       audio.autoplay = autoplay
       audio.volume = volume
       audio.src = tracks[nextIndex].src
@@ -304,6 +312,7 @@ export function MusicPlayer() {
       nextTimerRef.current = null
     }
     if (audioRef.current) {
+      playbackIntentRef.current = false
       audioRef.current.pause()
       audioRef.current.autoplay = false
     }
@@ -312,7 +321,14 @@ export function MusicPlayer() {
   }
 
   const handleTrackEnded = () => {
-    if (tracks.length < 2) return
+    if (tracks.length < 2) {
+      playbackIntentRef.current = false
+      setIsPlaying(false)
+      return
+    }
+    // Keep the intent alive through the ended/pause event so a background
+    // transition does not turn automatic playlist playback off.
+    playbackIntentRef.current = true
     // Keep the two-second pause while visible. When iOS backgrounds the page,
     // timers may be suspended, so advance from the native ended event instead.
     if (document.hidden) {
@@ -330,11 +346,12 @@ export function MusicPlayer() {
   useEffect(() => {
     const continueInBackground = () => {
       const audio = audioRef.current
+      if (!playbackIntentRef.current) return
       if (document.hidden) {
         // Retry the native media session when the browser changes visibility;
         // this is intentionally not timer-based because iOS suspends timers.
-        if (audio && isPlaying && audio.paused && !audio.ended) {
-          audio.play().catch(() => undefined)
+        if (audio && audio.paused && !audio.ended) {
+          audio.play().then(() => setIsPlaying(true)).catch(() => undefined)
         }
         return
       }
@@ -354,6 +371,7 @@ export function MusicPlayer() {
       nextTimerRef.current = null
     }
     if (audioRef.current) {
+      playbackIntentRef.current = false
       audioRef.current.pause()
       audioRef.current.autoplay = false
     }
@@ -399,6 +417,7 @@ export function MusicPlayer() {
       nextTimerRef.current = null
     }
     if (audioRef.current && index === currentIndex) {
+      playbackIntentRef.current = false
       audioRef.current.pause()
       audioRef.current.autoplay = false
     }
@@ -452,7 +471,7 @@ export function MusicPlayer() {
       audio.src = currentTrack.src
       audio.load()
       setMessage('正在重新載入音樂…')
-      if (isPlaying) playTrackWhenReady(audio)
+      if (playbackIntentRef.current) playTrackWhenReady(audio, document.hidden)
       return
     }
     setIsPlaying(false)
@@ -504,8 +523,14 @@ export function MusicPlayer() {
     if (!('mediaSession' in navigator)) return
     const mediaSession = navigator.mediaSession
     mediaSession.metadata = new MediaMetadata({ title: currentTrack.name, artist: '修仙伴讀', album: '靜心音律' })
-    const play = () => { audioRef.current?.play().catch(() => setMessage('請點擊播放鍵，瀏覽器不允許自動播放聲音。')) }
-    const pause = () => audioRef.current?.pause()
+    const play = () => {
+      playbackIntentRef.current = true
+      audioRef.current?.play().catch(() => setMessage('請點擊播放鍵，瀏覽器不允許自動播放聲音。'))
+    }
+    const pause = () => {
+      playbackIntentRef.current = false
+      audioRef.current?.pause()
+    }
     const seekBy = (seconds: number) => {
       if (!audioRef.current) return
       audioRef.current.currentTime = Math.max(0, Math.min(audioRef.current.duration || Number.MAX_SAFE_INTEGER, audioRef.current.currentTime + seconds))
@@ -544,7 +569,7 @@ export function MusicPlayer() {
       <div className="music-track-info"><span className="music-track-icon">{isPlaying ? '♫' : '♪'}</span><div><strong>{currentTrack.name}</strong><small>修仙伴讀背景音樂 · {playlistCountLabel}</small></div></div>
       <button type="button" className="text-button music-playlist-toggle" onClick={() => setShowPlaylist((current) => !current)}>{showPlaylist ? '收起歌單' : '查看歌單'}</button>
     </div>
-    <audio ref={audioRef} className="music-audio" src={currentTrack.src} controls preload="auto" playsInline aria-label={`播放 ${currentTrack.name}`} onPlay={() => { audioRecoveryRef.current = false; if (audioRef.current) audioRef.current.autoplay = true; setIsPlaying(true) }} onPause={() => setIsPlaying(false)} onVolumeChange={handleVolumeChange} onEnded={handleTrackEnded} onError={handleAudioError} />
+    <audio ref={audioRef} className="music-audio" src={currentTrack.src} controls preload="auto" playsInline aria-label={`播放 ${currentTrack.name}`} onPlay={() => { audioRecoveryRef.current = false; playbackIntentRef.current = true; if (audioRef.current) audioRef.current.autoplay = true; setIsPlaying(true) }} onPause={() => { const audio = audioRef.current; if (audio?.ended) return; setIsPlaying(false); window.setTimeout(() => { if (!audio || audio !== audioRef.current || audio.ended) return; if (document.hidden && playbackIntentRef.current) { audio.play().then(() => setIsPlaying(true)).catch(() => undefined); return } if (!document.hidden) playbackIntentRef.current = false }, 0) }} onVolumeChange={handleVolumeChange} onEnded={handleTrackEnded} onError={handleAudioError} />
     <div className="music-actions">
       <button type="button" className="soft-button" onClick={previousTrack} disabled={tracks.length < 2}>上一首</button>
       <button type="button" className="soft-button" onClick={() => nextTrack(false)} disabled={tracks.length < 2}>下一首</button>
