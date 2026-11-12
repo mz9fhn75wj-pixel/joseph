@@ -118,6 +118,29 @@ function applySavedOrder(tracks: MusicTrack[], order: string[]) {
   return [...ordered, ...tracks.filter((track) => !seen.has(track.id))]
 }
 
+function createSilenceWavUrl(durationMs: number) {
+  const sampleRate = 8000
+  const sampleCount = Math.max(1, Math.round(sampleRate * durationMs / 1000))
+  const buffer = new ArrayBuffer(44 + sampleCount)
+  const view = new DataView(buffer)
+  const writeText = (offset: number, value: string) => [...value].forEach((character, index) => view.setUint8(offset + index, character.charCodeAt(0)))
+  writeText(0, 'RIFF')
+  view.setUint32(4, 36 + sampleCount, true)
+  writeText(8, 'WAVE')
+  writeText(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate, true)
+  view.setUint16(32, 1, true)
+  view.setUint16(34, 8, true)
+  writeText(36, 'data')
+  view.setUint32(40, sampleCount, true)
+  for (let index = 44; index < buffer.byteLength; index += 1) view.setUint8(index, 128)
+  return URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }))
+}
+
 export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
   const initialSession = getCloudSession()
   const initialOwnerId = initialSession?.userId
@@ -127,6 +150,11 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
   const objectUrlsRef = useRef<string[]>([])
   const audioRef = useRef<HTMLAudioElement>(null)
   const nextTimerRef = useRef<number | null>(null)
+  const gapSourceRef = useRef<string | null>(null)
+  const inTrackGapRef = useRef(false)
+  const playbackAttemptRef = useRef(0)
+  const playbackAttemptCleanupRef = useRef<(() => void) | null>(null)
+  const playbackRetryTimerRef = useRef<number | null>(null)
   const audioRecoveryRef = useRef(false)
   // Keep the user's intention separate from the browser's transient playback
   // state. iOS can emit a pause event while Safari is moving to the
@@ -238,7 +266,13 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
     return () => { libraryLoadRef.current += 1; unsubscribe(); window.removeEventListener('cultivation-companion-cloud-ready', reload) }
   }, [])
 
-  useEffect(() => () => { objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url)); if (nextTimerRef.current !== null) window.clearTimeout(nextTimerRef.current) }, [])
+  useEffect(() => () => {
+    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
+    if (gapSourceRef.current) URL.revokeObjectURL(gapSourceRef.current)
+    if (nextTimerRef.current !== null) window.clearTimeout(nextTimerRef.current)
+    if (playbackRetryTimerRef.current !== null) window.clearTimeout(playbackRetryTimerRef.current)
+    playbackAttemptCleanupRef.current?.()
+  }, [])
   useEffect(() => { queueCloudMusicSettings() }, [playMode, currentTrack?.id, volume, tracks, cloudSession, cloudMusicReady])
   useEffect(() => { if (audioRef.current) audioRef.current.volume = soundEnabled ? volume : 0 }, [currentTrack?.id, volume, soundEnabled])
 
@@ -257,53 +291,54 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
   const playlistCountLabel = useMemo(() => `${tracks.length} 首歌曲`, [tracks.length])
 
   const playTrackWhenReady = (audio: HTMLAudioElement, background = false) => {
-    let started = false
+    playbackAttemptCleanupRef.current?.()
+    if (playbackRetryTimerRef.current !== null) window.clearTimeout(playbackRetryTimerRef.current)
+    const attemptId = ++playbackAttemptRef.current
+    let retries = 0
+    let finished = false
+    let retryTimer: number | null = null
     const stopListening = () => {
-      audio.removeEventListener('canplay', startPlayback)
-      audio.removeEventListener('loadeddata', startPlayback)
+      audio.removeEventListener('canplay', tryPlayback)
+      audio.removeEventListener('loadeddata', tryPlayback)
+      audio.removeEventListener('canplaythrough', tryPlayback)
+      if (retryTimer !== null) window.clearTimeout(retryTimer)
+      if (playbackRetryTimerRef.current === retryTimer) playbackRetryTimerRef.current = null
+      if (playbackAttemptCleanupRef.current === cleanup) playbackAttemptCleanupRef.current = null
     }
-    const startPlayback = () => {
-      if (started) return
-      started = true
-      stopListening()
+    const cleanup = () => { finished = true; stopListening() }
+    const tryAgain = () => {
+      if (finished || attemptId !== playbackAttemptRef.current || !playbackIntentRef.current) return
+      retryTimer = null
+      playbackRetryTimerRef.current = null
+      audio.load()
+      tryPlayback()
+    }
+    const tryPlayback = () => {
+      if (finished || attemptId !== playbackAttemptRef.current || !playbackIntentRef.current) return
+      if (audio.readyState < HTMLMediaElement.HAVE_CURRENT_DATA && !background && !document.hidden) return
+      retries += 1
       audio.play().then(() => {
-        started = true
-        stopListening()
+        if (attemptId !== playbackAttemptRef.current) return
+        cleanup()
         setIsPlaying(true)
       }).catch(() => {
+        if (finished || attemptId !== playbackAttemptRef.current) return
         setIsPlaying(false)
+        if ((background || document.hidden) && retries < 8) {
+          retryTimer = window.setTimeout(tryAgain, Math.min(1200, 180 * retries))
+          playbackRetryTimerRef.current = retryTimer
+          return
+        }
+        cleanup()
         setMessage('手機瀏覽器阻擋自動播放，請先點擊播放鍵一次。')
       })
     }
-
-    // iOS may suspend the page after it is backgrounded and never deliver a
-    // canplay callback until the app returns to the foreground. Calling play
-    // immediately on the same, user-authorized audio element lets the native
-    // media session continue loading the next file in the background.
-    if (background) {
-      audio.autoplay = true
-      // iOS may not have decoded the replacement source when the ended event
-      // fires. Keep autoplay enabled and retry as soon as the new source has
-      // data; the immediate play call covers browsers that keep decoding in
-      // the background.
-      audio.addEventListener('canplay', startPlayback, { once: true })
-      audio.addEventListener('loadeddata', startPlayback, { once: true })
-      audio.play().then(() => {
-        setIsPlaying(true)
-      }).catch(() => {
-        // autoplay remains enabled so iOS can start playback as soon as the
-        // source finishes loading; a later visibility change retries it.
-        setIsPlaying(false)
-      })
-      return
-    }
-
-    if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
-      startPlayback()
-      return
-    }
-    audio.addEventListener('canplay', startPlayback, { once: true })
-    audio.addEventListener('loadeddata', startPlayback, { once: true })
+    playbackAttemptCleanupRef.current = cleanup
+    audio.addEventListener('canplay', tryPlayback)
+    audio.addEventListener('loadeddata', tryPlayback)
+    audio.addEventListener('canplaythrough', tryPlayback)
+    audio.autoplay = true
+    tryPlayback()
   }
 
   const nextTrack = (autoplay: boolean) => {
@@ -315,6 +350,13 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
       window.clearTimeout(nextTimerRef.current)
       nextTimerRef.current = null
     }
+    playbackAttemptCleanupRef.current?.()
+    playbackAttemptRef.current += 1
+    if (playbackRetryTimerRef.current !== null) {
+      window.clearTimeout(playbackRetryTimerRef.current)
+      playbackRetryTimerRef.current = null
+    }
+    inTrackGapRef.current = false
     const nextIndex = playMode === 'shuffle'
       ? (() => { const candidates = tracks.map((_, index) => index).filter((index) => index !== currentIndex); return candidates[Math.floor(Math.random() * candidates.length)] })()
       : (currentIndex + 1) % tracks.length
@@ -345,6 +387,13 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
       window.clearTimeout(nextTimerRef.current)
       nextTimerRef.current = null
     }
+    playbackAttemptCleanupRef.current?.()
+    playbackAttemptRef.current += 1
+    if (playbackRetryTimerRef.current !== null) {
+      window.clearTimeout(playbackRetryTimerRef.current)
+      playbackRetryTimerRef.current = null
+    }
+    inTrackGapRef.current = false
     if (audioRef.current) {
       playbackIntentRef.current = false
       audioRef.current.pause()
@@ -355,6 +404,11 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
   }
 
   const handleTrackEnded = () => {
+    if (inTrackGapRef.current) {
+      inTrackGapRef.current = false
+      nextTrack(true)
+      return
+    }
     if (tracks.length < 2) {
       playbackIntentRef.current = false
       setIsPlaying(false)
@@ -363,18 +417,25 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
     // Keep the intent alive through the ended/pause event so a background
     // transition does not turn automatic playlist playback off.
     playbackIntentRef.current = true
-    // Keep the two-second pause while visible. When iOS backgrounds the page,
-    // timers may be suspended, so advance from the native ended event instead.
-    if (document.hidden) {
-      setMessage('歌曲結束，正在背景接續播放下一首。')
-      nextTrack(true)
-      return
-    }
     setMessage('歌曲結束，2 秒後播放下一首。')
+    const audio = audioRef.current
+    if (audio) {
+      inTrackGapRef.current = true
+      gapSourceRef.current ??= createSilenceWavUrl(TRACK_GAP_MS)
+      audio.autoplay = true
+      audio.volume = 0
+      audio.src = gapSourceRef.current
+      audio.load()
+      playTrackWhenReady(audio, document.hidden)
+    }
+    // Fallback for browsers that cannot decode the generated silent WAV.
     nextTimerRef.current = window.setTimeout(() => {
       nextTimerRef.current = null
-      nextTrack(true)
-    }, TRACK_GAP_MS)
+      if (inTrackGapRef.current) {
+        inTrackGapRef.current = false
+        nextTrack(true)
+      }
+    }, TRACK_GAP_MS + 800)
   }
 
   useEffect(() => {
@@ -387,12 +448,6 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
         if (audio && audio.paused && !audio.ended) {
           audio.play().then(() => setIsPlaying(true)).catch(() => undefined)
         }
-        return
-      }
-      if (nextTimerRef.current !== null) {
-        window.clearTimeout(nextTimerRef.current)
-        nextTimerRef.current = null
-        nextTrack(true)
       }
     }
     document.addEventListener('visibilitychange', continueInBackground)
@@ -404,6 +459,13 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
       window.clearTimeout(nextTimerRef.current)
       nextTimerRef.current = null
     }
+    playbackAttemptCleanupRef.current?.()
+    playbackAttemptRef.current += 1
+    if (playbackRetryTimerRef.current !== null) {
+      window.clearTimeout(playbackRetryTimerRef.current)
+      playbackRetryTimerRef.current = null
+    }
+    inTrackGapRef.current = false
     if (audioRef.current) {
       playbackIntentRef.current = false
       audioRef.current.pause()
@@ -636,7 +698,7 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
       <div className="music-track-info"><span className="music-track-icon">{isPlaying ? '♫' : '♪'}</span><div><strong>{currentTrack?.name ?? '尚未加入歌曲'}</strong><small>修仙伴讀背景音樂 · {playlistCountLabel}</small></div></div>
       <button type="button" className="text-button music-playlist-toggle" onClick={() => setShowPlaylist((current) => !current)}>{showPlaylist ? '收起歌單' : '查看歌單'}</button>
     </div>
-    {currentTrack ? <audio ref={audioRef} className="music-audio" src={currentTrack.src} controls preload="auto" playsInline aria-label={`播放 ${currentTrack.name}`} onPlay={() => { audioRecoveryRef.current = false; playbackIntentRef.current = true; if (audioRef.current) audioRef.current.autoplay = true; setIsPlaying(true) }} onPause={() => { const audio = audioRef.current; if (audio?.ended) return; setIsPlaying(false); window.setTimeout(() => { if (!audio || audio !== audioRef.current || audio.ended) return; if (document.hidden && playbackIntentRef.current) { audio.play().then(() => setIsPlaying(true)).catch(() => undefined); return } if (!document.hidden) playbackIntentRef.current = false }, 0) }} onVolumeChange={handleVolumeChange} onEnded={handleTrackEnded} onError={handleAudioError} /> : <div className="music-empty"><span>♫</span><p>目前沒有歌曲<br /><small>選擇 MP3 後即可建立自己的歌單。</small></p></div>}
+    {currentTrack ? <audio ref={audioRef} className="music-audio" controls preload="auto" playsInline aria-label={`播放 ${currentTrack.name}`} onPlay={() => { audioRecoveryRef.current = false; playbackIntentRef.current = true; if (audioRef.current) audioRef.current.autoplay = true; setIsPlaying(true) }} onPause={() => { const audio = audioRef.current; if (audio?.ended) return; setIsPlaying(false); window.setTimeout(() => { if (!audio || audio !== audioRef.current || audio.ended) return; if (document.hidden && playbackIntentRef.current) { audio.play().then(() => setIsPlaying(true)).catch(() => undefined); return } if (!document.hidden) playbackIntentRef.current = false }, 0) }} onVolumeChange={handleVolumeChange} onEnded={handleTrackEnded} onError={handleAudioError} /> : <div className="music-empty"><span>♫</span><p>目前沒有歌曲<br /><small>選擇 MP3 後即可建立自己的歌單。</small></p></div>}
     <div className="music-actions">
       <button type="button" className="soft-button" onClick={previousTrack} disabled={tracks.length < 2}>上一首</button>
       <button type="button" className="soft-button" onClick={() => nextTrack(false)} disabled={tracks.length < 2}>下一首</button>
