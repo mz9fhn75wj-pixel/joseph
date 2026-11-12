@@ -100,7 +100,7 @@ function applySavedOrder(tracks: MusicTrack[], order: string[]) {
   return [...ordered, ...tracks.filter((track) => !seen.has(track.id))]
 }
 
-export function MusicPlayer() {
+export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
   const savedTrackId = useRef(localStorage.getItem(MUSIC_TRACK_KEY) ?? defaultTrack.id)
   const savedOrder = useRef(readTrackOrder())
   const savedNames = useRef(readTrackNames())
@@ -223,7 +223,7 @@ export function MusicPlayer() {
     if (nextTimerRef.current !== null) window.clearTimeout(nextTimerRef.current)
   }, [])
   useEffect(() => { queueCloudMusicSettings() }, [playMode, currentTrack.id, volume, tracks, cloudSession, cloudMusicReady])
-  useEffect(() => { if (audioRef.current) audioRef.current.volume = volume }, [currentTrack.id, volume])
+  useEffect(() => { if (audioRef.current) audioRef.current.volume = soundEnabled ? volume : 0 }, [currentTrack.id, volume, soundEnabled])
 
   useEffect(() => {
     const audio = audioRef.current
@@ -296,7 +296,7 @@ export function MusicPlayer() {
       // session before the replacement source is ready.
       if (!autoplay) audio.pause()
       audio.autoplay = autoplay
-      audio.volume = volume
+      audio.volume = soundEnabled ? volume : 0
       audio.src = tracks[nextIndex].src
       audio.load()
     }
@@ -463,7 +463,11 @@ export function MusicPlayer() {
     setMessage(cloudDeleteFailed ? '歌曲已從本機刪除，但雲端刪除失敗，請稍後重新同步。' : `已刪除「${track.name}」。`)
   }
 
-  const handleVolumeChange = (event: React.SyntheticEvent<HTMLAudioElement>) => setVolume(event.currentTarget.volume)
+  const handleVolumeChange = (event: React.SyntheticEvent<HTMLAudioElement>) => {
+    // While muted, keep the user's preferred volume so turning sound back on
+    // restores it instead of saving the temporary zero volume.
+    if (soundEnabled) setVolume(event.currentTarget.volume)
+  }
   const handleAudioError = () => {
     const audio = audioRef.current
     if (audio && !audioRecoveryRef.current) {
@@ -558,7 +562,7 @@ export function MusicPlayer() {
         // Ignore unsupported cleanup actions.
       }
     }
-  }, [currentTrack.id, currentTrack.name, playMode, tracks.length, currentIndex])
+  }, [currentTrack.id, currentTrack.name, playMode, tracks.length, currentIndex, soundEnabled])
 
   useEffect(() => {
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'

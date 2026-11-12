@@ -95,8 +95,7 @@ export function Layout({ activeView, onNavigate, playerName, onPlayerNameChange,
           <div className="mobile-brand"><span className="brand-icon">☯</span><strong>修仙伴讀</strong></div>
           <div className="topbar-actions">
             <span className={`network-status ${online ? 'online' : 'offline'}`} role="status"><i />{online ? '已連線' : '離線模式'}</span>
-            <button className="sound-toggle" type="button" onClick={onSoundToggle} aria-label={soundEnabled ? '關閉互動音效' : '開啟互動音效'} aria-pressed={soundEnabled}>{soundEnabled ? '♫' : '♪̸'}<span>{soundEnabled ? '音效開' : '音效關'}</span></button>
-            <button className="icon-button" aria-label="通知">♧<span className="notification-dot" /></button>
+            <button className="sound-toggle" type="button" onClick={onSoundToggle} aria-label={soundEnabled ? '關閉所有聲音' : '開啟所有聲音'} aria-pressed={soundEnabled}>{soundEnabled ? '♫' : '♪̸'}<span>{soundEnabled ? '聲音開' : '聲音關'}</span></button>
             <div className="profile-wrap">
               <button className="user-chip" onClick={() => setEditingName((current) => !current)}><span className="avatar">居</span><span>{playerName}</span><span>⌄</span></button>
               {editingName && <form className="profile-popover" onSubmit={saveName}><label htmlFor="player-name">修士稱號</label><div><input id="player-name" value={draftName} onChange={(event) => setDraftName(event.target.value)} maxLength={16} autoFocus /><button type="submit">保存</button></div><div className="save-tools"><button type="button" onClick={onExportSave}>匯出存檔</button><label>匯入存檔<input type="file" accept="application/json,.json" onChange={chooseSaveFile} /></label></div><button type="button" className="reset-save-button" onClick={onResetSave}>重置遊戲資料</button><small className="save-note">遊戲進度可轉移；音樂檔案會留在原裝置。</small><CloudSyncPanel session={cloudSession} status={cloudStatus} onSignIn={onCloudSignIn} onSignUp={onCloudSignUp} onSignOut={onCloudSignOut} onUpload={onCloudUpload} onDownload={onCloudDownload} /></form>}
@@ -104,7 +103,7 @@ export function Layout({ activeView, onNavigate, playerName, onPlayerNameChange,
           </div>
         </header>
         <div className="page-content">{children}</div>
-        <MusicPlayer />
+        <MusicPlayer soundEnabled={soundEnabled} />
       </main>
     </div>
   )
