@@ -257,18 +257,9 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
   const playlistCountLabel = useMemo(() => `${tracks.length} 首歌曲`, [tracks.length])
 
   const playTrackWhenReady = (audio: HTMLAudioElement, background = false) => {
-    let started = false
-    const stopListening = () => {
-      audio.removeEventListener('canplay', startPlayback)
-      audio.removeEventListener('loadeddata', startPlayback)
-    }
     const startPlayback = () => {
-      if (started) return
-      started = true
-      stopListening()
+      audio.removeEventListener('canplay', startPlayback)
       audio.play().then(() => {
-        started = true
-        stopListening()
         setIsPlaying(true)
       }).catch(() => {
         setIsPlaying(false)
@@ -282,12 +273,6 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
     // media session continue loading the next file in the background.
     if (background) {
       audio.autoplay = true
-      // iOS may not have decoded the replacement source when the ended event
-      // fires. Keep autoplay enabled and retry as soon as the new source has
-      // data; the immediate play call covers browsers that keep decoding in
-      // the background.
-      audio.addEventListener('canplay', startPlayback, { once: true })
-      audio.addEventListener('loadeddata', startPlayback, { once: true })
       audio.play().then(() => {
         setIsPlaying(true)
       }).catch(() => {
@@ -303,7 +288,6 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
       return
     }
     audio.addEventListener('canplay', startPlayback, { once: true })
-    audio.addEventListener('loadeddata', startPlayback, { once: true })
   }
 
   const nextTrack = (autoplay: boolean) => {
@@ -499,32 +483,6 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
     setMessage(`已刪除「${track.name}」。`)
   }
 
-  const clearCustomTracks = async () => {
-    const customTracks = tracks.filter((track) => !builtInTracks.some((builtIn) => builtIn.id === track.id))
-    if (!customTracks.length) {
-      setMessage('目前沒有可清除的自訂歌曲。')
-      return
-    }
-    if (!window.confirm(`確定要刪除目前 ${customTracks.length} 首自訂歌曲嗎？40 首內建歌曲會保留，刪除後無法復原。`)) return
-    playbackIntentRef.current = false
-    audioRef.current?.pause()
-    const failed: string[] = []
-    for (const track of customTracks) {
-      try {
-        await deleteStoredTrack(track.id)
-        if (cloudSession) await deleteCloudMusic(track.id, cloudSession)
-        if (track.src.startsWith('blob:')) URL.revokeObjectURL(track.src)
-      } catch {
-        failed.push(track.name)
-      }
-    }
-    const remaining = tracks.filter((track) => !customTracks.includes(track) || failed.includes(track.name))
-    setTracks(remaining)
-    setCurrentIndex(Math.min(currentIndex, Math.max(remaining.length - 1, 0)))
-    if (failed.length) setMessage(`已刪除 ${customTracks.length - failed.length} 首，${failed.length} 首刪除失敗，請重新登入後再試。`)
-    else setMessage(`已清除 ${customTracks.length} 首自訂歌曲，40 首內建歌曲已保留。`)
-  }
-
   const handleVolumeChange = (event: React.SyntheticEvent<HTMLAudioElement>) => {
     // While muted, keep the user's preferred volume so turning sound back on
     // restores it instead of saving the temporary zero volume.
@@ -641,7 +599,6 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
       <button type="button" className="soft-button" onClick={previousTrack} disabled={tracks.length < 2}>上一首</button>
       <button type="button" className="soft-button" onClick={() => nextTrack(false)} disabled={tracks.length < 2}>下一首</button>
       <label className="soft-button music-file-button">加入 MP3<input type="file" accept="audio/mpeg,.mp3" multiple onChange={(event) => void handleFileSelection(event)} /></label>
-      {isPrimaryMusicAccount(cloudSession) && tracks.some((track) => !builtInTracks.some((builtIn) => builtIn.id === track.id)) && <button type="button" className="text-button" onClick={() => void clearCustomTracks()}>清除自訂歌曲</button>}
       <select className="music-mode-select" value={playMode} onChange={(event) => setPlayMode(event.target.value as PlayMode)} aria-label="播放模式"><option value="sequential">依序播放</option><option value="shuffle">隨機播放</option></select>
     </div>
     {showPlaylist && <div className="music-playlist">{tracks.map((track, index) => <div className={`music-playlist-item ${index === currentIndex ? 'active' : ''}`} data-playlist-index={index} key={track.id} onPointerDown={(event) => handlePlaylistPointerDown(index, event)} onPointerMove={handlePlaylistPointerMove} onPointerUp={stopPlaylistDragging} onPointerCancel={stopPlaylistDragging}><span>{index + 1}</span>{editingTrackId === track.id ? <input className="music-rename-input" value={editingName} onChange={(event) => setEditingName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') saveTrackName(track.id); if (event.key === 'Escape') setEditingTrackId(null) }} autoFocus /> : <button type="button" className="music-track-select" onClick={() => chooseTrack(index)}>{track.name}</button>}{editingTrackId === track.id ? <button type="button" className="music-rename-save" onClick={() => saveTrackName(track.id)}>保存</button> : <button type="button" className="music-rename-button" onClick={() => startRenaming(track)}>改名</button>}{track.local || !builtInTracks.some((candidate) => candidate.id === track.id) ? <button type="button" className="music-delete-button" onClick={() => void removeTrack(track, index)} aria-label={`刪除 ${track.name}`} title="刪除歌曲">刪除</button> : null}</div>)}</div>}
