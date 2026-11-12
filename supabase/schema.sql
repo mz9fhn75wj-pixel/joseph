@@ -24,9 +24,11 @@ alter table public.cloud_music enable row level security;
 create policy "users can read their own music" on public.cloud_music for select using (auth.uid() = user_id);
 create policy "users can create their own music" on public.cloud_music for insert with check (auth.uid() = user_id);
 create policy "users can update their own music" on public.cloud_music for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "users can delete their own music" on public.cloud_music for delete using (auth.uid() = user_id);
 
 insert into storage.buckets (id, name, public) values ('music', 'music', false) on conflict (id) do nothing;
 create policy "users can read their own music files" on storage.objects for select using (bucket_id = 'music' and (storage.foldername(name))[1] = auth.uid()::text);
 create policy "users can upload their own music files" on storage.objects for insert with check (bucket_id = 'music' and (storage.foldername(name))[1] = auth.uid()::text);
 create policy "users can update their own music files" on storage.objects for update using (bucket_id = 'music' and (storage.foldername(name))[1] = auth.uid()::text);
+create policy "users can delete their own music files" on storage.objects for delete using (bucket_id = 'music' and (storage.foldername(name))[1] = auth.uid()::text);
 

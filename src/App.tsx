@@ -14,13 +14,14 @@ import { StatisticsPanel } from './components/StatisticsPanel'
 import { achievementCatalog, createDailyTasks, difficultyOptions, furnitureCatalog, fruitCatalog, getFruitKind, getMedicalCourseProfile, getMedicalFruitTypeId, getSubjectReward, initialGameState, medicalRequiredCourses, petRecipes, qualityOptions, rareWorldFinds, realmData } from './data'
 import { clearStudyAndAchievementTestData, clearStudyTestData, loadGameState, makeId, PET_ACHIEVEMENT_RESET_KEY, resetPetAndAchievements, saveGameState, TEST_STUDY_DATA_CLEANUP_KEY } from './utils/storage'
 import { playSound, readSoundEnabled, setSoundEnabled } from './utils/sound'
-import { getCloudSession, loadCloudSnapshot, saveCloudSnapshot, signInCloud, signOutCloud, signUpCloud, type CloudSession } from './utils/cloudSync'
+import { getCloudSession, loadCloudSnapshot, onCloudSessionChange, saveCloudSnapshot, signInCloud, signOutCloud, signUpCloud, type CloudSession } from './utils/cloudSync'
 import { localDateKey } from './utils/date'
 import type { GameState, Subject, SubjectDifficulty, SubjectQuality, View } from './types'
 
 const today = () => localDateKey()
 const CLOUD_TEST_STUDY_DATA_CLEANUP_KEY = 'cultivation-companion-cloud-test-study-data-cleanup-v2'
 const CLOUD_PET_ACHIEVEMENT_RESET_KEY = 'cultivation-companion-cloud-pet-achievement-reset-v1'
+const CLOUD_LOCAL_OWNER_KEY = 'cultivation-companion-cloud-local-owner-v1'
 
 function getInteractionSlot(date: Date) {
   const hour = date.getHours()
@@ -49,6 +50,10 @@ function syncAchievements(state: GameState): GameState {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function createCleanGameState() {
+  return syncAchievements(resetPetAndAchievements(clearStudyTestData(initialGameState)))
 }
 
 function App() {
@@ -105,8 +110,10 @@ function App() {
         }
         if (shouldSaveCleanCloudState) saveCloudSnapshot(cloudState, undefined, cloudSession).catch(() => setCloudStatus('本機初始化資料已調整，雲端更新稍後重試。'))
         setGame(syncAchievements(cloudState))
+        localStorage.setItem(CLOUD_LOCAL_OWNER_KEY, cloudSession.userId)
         setCloudStatus('已載入雲端進度。')
       } else {
+        localStorage.setItem(CLOUD_LOCAL_OWNER_KEY, cloudSession.userId)
         setCloudStatus('這是此帳號的第一台裝置，之後會自動上傳進度。')
       }
       setCloudReady(true)
@@ -116,6 +123,7 @@ function App() {
     })
     return () => { cancelled = true }
   }, [cloudSession?.userId])
+  useEffect(() => onCloudSessionChange((session) => setCloudSession(session)), [])
   useEffect(() => { if (!toast) return; const id = window.setTimeout(() => setToast(''), 2600); return () => window.clearTimeout(id) }, [toast])
   useEffect(() => { const id = window.setInterval(() => setClockTick(Date.now()), 30000); return () => window.clearInterval(id) }, [])
   useEffect(() => {
@@ -203,14 +211,25 @@ function App() {
     setGame({ ...freshState, lastEnergyRecoveryAt: new Date().toISOString() })
     addToast('遊戲資料已重置；本機 MP3 歌單仍然保留。')
   }
+  const prepareCloudAccount = (session: CloudSession) => {
+    const localOwner = localStorage.getItem(CLOUD_LOCAL_OWNER_KEY)
+    if (localOwner && localOwner !== session.userId) {
+      const cleanState = createCleanGameState()
+      saveGameState(cleanState)
+      setGame(cleanState)
+      setCloudStatus('已切換雲端帳號，正在載入該帳號資料。')
+    }
+  }
   const handleCloudSignIn = async (email: string, password: string) => {
     const session = await signInCloud(email, password)
+    prepareCloudAccount(session)
     setCloudSession(session)
     addToast('雲端登入成功，正在同步所有裝置。')
   }
   const handleCloudSignUp = async (email: string, password: string) => {
     const session = await signUpCloud(email, password)
     if (session) {
+      prepareCloudAccount(session)
       setCloudSession(session)
       addToast('帳號建立成功，正在同步所有裝置。')
     } else {
@@ -257,7 +276,7 @@ function App() {
         ...current,
         cultivationExp: current.cultivationExp + reward.exp,
         spiritStones: current.spiritStones + reward.stones,
-        pet: { ...current.pet, energy: Math.max(15, current.pet.energy - Math.round(minutes / 4)), mood: Math.min(100, current.pet.mood + 5), intimacy: Math.min(100, current.pet.intimacy + Math.min(10, Math.round(minutes / 5))), combatStats: { ...current.pet.combatStats, ...fruitCombatBoost } },
+        pet: { ...current.pet, energy: Math.max(15, current.pet.energy - Math.round(minutes / 4)), mood: Math.min(100, current.pet.mood + 5), intimacy: Math.min(100, current.pet.intimacy + Math.min(10, Math.round(minutes / 5))), combatStats: { attack: current.pet.combatStats.attack + (fruitCombatBoost.attack ?? 0), defense: current.pet.combatStats.defense + (fruitCombatBoost.defense ?? 0), spirit: current.pet.combatStats.spirit + (fruitCombatBoost.spirit ?? 0), agility: current.pet.combatStats.agility + (fruitCombatBoost.agility ?? 0) } },
         sessions: [...current.sessions, { id: makeId('session'), subject, minutes, difficulty: reward.difficulty, quality: reward.quality, rewardExp: reward.exp, rewardStones: reward.stones, completedAt: new Date().toISOString() }],
         tasks: current.tasks.map((task) => task.subject === subject && !task.completed ? { ...task, progressMinutes: Math.min(task.targetMinutes, (task.progressMinutes ?? 0) + minutes) } : task),
         fruitGarden: { fruits: [...current.fruitGarden.fruits.filter((fruit) => fruit.id !== fruitKind.id), { ...existingFruit, progressMinutes: totalFruitMinutes % existingFruit.targetMinutes, readyCount: existingFruit.readyCount + grownFruit }] },
