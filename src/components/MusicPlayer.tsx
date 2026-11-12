@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from 'react'
-import { deleteCloudMusic, getCloudSession, listCloudMusic, onCloudSessionChange, readCloudMusicSettings, saveCloudMusicSettings, uploadCloudMusic, type CloudMusicSettings, type CloudMusicTrack } from '../utils/cloudSync'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { deleteCloudMusic, getCloudSession, listCloudMusic, onCloudSessionChange, readCloudMusicSettings, saveCloudMusicSettings, type CloudMusicSettings } from '../utils/cloudSync'
 import { builtInMusicTracks } from '../data/musicLibrary'
 
 type PlayMode = 'sequential' | 'shuffle'
@@ -17,7 +17,6 @@ interface StoredMusicTrack {
   name: string
   blob: Blob
   createdAt: number
-  ownerId?: string
 }
 
 interface DockPosition {
@@ -25,25 +24,16 @@ interface DockPosition {
   top: number
 }
 
+const MUSIC_DB_NAME = 'cultivation-companion-music-v1'
+const MUSIC_STORE_NAME = 'tracks'
 const MUSIC_MODE_KEY = 'cultivation-companion-music-mode-v1'
 const MUSIC_TRACK_KEY = 'cultivation-companion-current-track-v1'
 const MUSIC_VOLUME_KEY = 'cultivation-companion-music-volume-v1'
 const MUSIC_ORDER_KEY = 'cultivation-companion-music-order-v1'
 const MUSIC_NAMES_KEY = 'cultivation-companion-music-names-v1'
 const TRACK_GAP_MS = 2000
-const PRIMARY_MUSIC_ACCOUNT = 'shih77213@gmail.com'
-const MUSIC_DB_NAME = 'cultivation-companion-music-v1'
-const MUSIC_STORE_NAME = 'tracks'
 const builtInTracks = builtInMusicTracks as MusicTrack[]
 const defaultTrack = builtInTracks[0]
-
-function isPrimaryMusicAccount(session: ReturnType<typeof getCloudSession>) {
-  return session?.email.trim().toLowerCase() === PRIMARY_MUSIC_ACCOUNT
-}
-
-function musicStorageKey(key: string, ownerId?: string) {
-  return ownerId ? `${key}:${ownerId}` : key
-}
 
 function openMusicDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -62,14 +52,6 @@ function readStoredTracks() {
   }))
 }
 
-function saveStoredTrack(track: StoredMusicTrack) {
-  return openMusicDatabase().then((database) => new Promise<void>((resolve, reject) => {
-    const request = database.transaction(MUSIC_STORE_NAME, 'readwrite').objectStore(MUSIC_STORE_NAME).put(track)
-    request.onsuccess = () => { database.close(); resolve() }
-    request.onerror = () => { database.close(); reject(request.error) }
-  }))
-}
-
 function deleteStoredTrack(trackId: string) {
   return openMusicDatabase().then((database) => new Promise<void>((resolve, reject) => {
     const request = database.transaction(MUSIC_STORE_NAME, 'readwrite').objectStore(MUSIC_STORE_NAME).delete(trackId)
@@ -78,27 +60,27 @@ function deleteStoredTrack(trackId: string) {
   }))
 }
 
-function readPlayMode(ownerId?: string): PlayMode {
-  return localStorage.getItem(musicStorageKey(MUSIC_MODE_KEY, ownerId)) === 'shuffle' ? 'shuffle' : 'sequential'
+function readPlayMode(): PlayMode {
+  return localStorage.getItem(MUSIC_MODE_KEY) === 'shuffle' ? 'shuffle' : 'sequential'
 }
 
-function readVolume(ownerId?: string) {
-  const value = Number(localStorage.getItem(musicStorageKey(MUSIC_VOLUME_KEY, ownerId)))
+function readVolume() {
+  const value = Number(localStorage.getItem(MUSIC_VOLUME_KEY))
   return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 1
 }
 
-function readTrackOrder(ownerId?: string) {
+function readTrackOrder() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(musicStorageKey(MUSIC_ORDER_KEY, ownerId)) ?? '[]')
+    const parsed = JSON.parse(localStorage.getItem(MUSIC_ORDER_KEY) ?? '[]')
     return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []
   } catch {
     return []
   }
 }
 
-function readTrackNames(ownerId?: string) {
+function readTrackNames() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(musicStorageKey(MUSIC_NAMES_KEY, ownerId)) ?? '{}')
+    const parsed = JSON.parse(localStorage.getItem(MUSIC_NAMES_KEY) ?? '{}')
     return parsed && typeof parsed === 'object' ? parsed as Record<string, string> : {}
   } catch {
     return {}
@@ -119,11 +101,9 @@ function applySavedOrder(tracks: MusicTrack[], order: string[]) {
 }
 
 export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
-  const initialSession = getCloudSession()
-  const initialOwnerId = initialSession?.userId
-  const savedTrackId = useRef(localStorage.getItem(musicStorageKey(MUSIC_TRACK_KEY, initialOwnerId)) ?? defaultTrack.id)
-  const savedOrder = useRef(readTrackOrder(initialOwnerId))
-  const savedNames = useRef(readTrackNames(initialOwnerId))
+  const savedTrackId = useRef(localStorage.getItem(MUSIC_TRACK_KEY) ?? defaultTrack.id)
+  const savedOrder = useRef(readTrackOrder())
+  const savedNames = useRef(readTrackNames())
   const objectUrlsRef = useRef<string[]>([])
   const audioRef = useRef<HTMLAudioElement>(null)
   const nextTimerRef = useRef<number | null>(null)
@@ -136,25 +116,24 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
   const settingsTimerRef = useRef<number | null>(null)
   const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null)
   const playlistDragIndexRef = useRef<number | null>(null)
-  const [tracks, setTracks] = useState<MusicTrack[]>([])
+  const [tracks, setTracks] = useState<MusicTrack[]>(builtInTracks.map((track) => ({ ...track, name: savedNames.current[track.id] ?? track.name })))
   const [currentIndex, setCurrentIndex] = useState(0)
-  const [playMode, setPlayMode] = useState<PlayMode>(() => readPlayMode(initialOwnerId))
-  const [volume, setVolume] = useState(() => readVolume(initialOwnerId))
+  const [playMode, setPlayMode] = useState<PlayMode>(readPlayMode)
+  const [volume, setVolume] = useState(readVolume)
   const [isPlaying, setIsPlaying] = useState(false)
   const [showPlaylist, setShowPlaylist] = useState(false)
   const [position, setPosition] = useState<DockPosition | null>(null)
   const [editingTrackId, setEditingTrackId] = useState<string | null>(null)
   const [editingName, setEditingName] = useState('')
-  const [message, setMessage] = useState('請登入後開始建立你的 MP3 歌單。')
-  const [cloudSession, setCloudSession] = useState(initialSession)
-  const [cloudMusicReady, setCloudMusicReady] = useState(() => !initialSession)
-  const currentTrack = tracks[currentIndex]
-  const displayTrack = currentTrack ?? defaultTrack
+  const [message, setMessage] = useState('本機 MP3 歌單會保存在這台裝置。')
+  const [cloudSession, setCloudSession] = useState(() => getCloudSession())
+  const [cloudMusicReady, setCloudMusicReady] = useState(() => !getCloudSession())
+  const currentTrack = tracks[currentIndex] ?? defaultTrack
 
   const makeMusicSettings = (overrides: Partial<CloudMusicSettings> = {}): CloudMusicSettings => ({
     order: tracks.map((track) => track.id),
     names: savedNames.current,
-    currentTrackId: currentTrack?.id ?? '',
+    currentTrackId: currentTrack.id,
     playMode,
     volume,
     ...overrides,
@@ -166,11 +145,11 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
     // a user signed in and the async library load had not finished yet.
     if (cloudSession && !cloudMusicReady) return
     const settings = makeMusicSettings(overrides)
-    localStorage.setItem(musicStorageKey(MUSIC_MODE_KEY, cloudSession?.userId), settings.playMode)
-    localStorage.setItem(musicStorageKey(MUSIC_TRACK_KEY, cloudSession?.userId), settings.currentTrackId)
-    localStorage.setItem(musicStorageKey(MUSIC_VOLUME_KEY, cloudSession?.userId), String(settings.volume))
-    localStorage.setItem(musicStorageKey(MUSIC_ORDER_KEY, cloudSession?.userId), JSON.stringify(settings.order))
-    localStorage.setItem(musicStorageKey(MUSIC_NAMES_KEY, cloudSession?.userId), JSON.stringify(settings.names))
+    localStorage.setItem(MUSIC_MODE_KEY, settings.playMode)
+    localStorage.setItem(MUSIC_TRACK_KEY, settings.currentTrackId)
+    localStorage.setItem(MUSIC_VOLUME_KEY, String(settings.volume))
+    localStorage.setItem(MUSIC_ORDER_KEY, JSON.stringify(settings.order))
+    localStorage.setItem(MUSIC_NAMES_KEY, JSON.stringify(settings.names))
     if (!cloudSession || !cloudMusicReady) return
     if (settingsTimerRef.current !== null) window.clearTimeout(settingsTimerRef.current)
     settingsTimerRef.current = window.setTimeout(() => {
@@ -181,52 +160,53 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
 
   const loadMusicLibrary = async (session: ReturnType<typeof getCloudSession>) => {
     const loadId = ++libraryLoadRef.current
-    const ownerId = session?.userId ?? 'anonymous'
-    const cloudSettings = readCloudMusicSettings(ownerId)
+    const cloudSettings = readCloudMusicSettings()
     if (cloudSettings) {
       savedOrder.current = cloudSettings.order ?? []
       savedNames.current = cloudSettings.names ?? {}
       savedTrackId.current = cloudSettings.currentTrackId || defaultTrack.id
-      setPlayMode(cloudSettings.playMode === 'shuffle' ? 'shuffle' : readPlayMode(ownerId))
+      setPlayMode(cloudSettings.playMode === 'shuffle' ? 'shuffle' : 'sequential')
       setVolume(Number.isFinite(cloudSettings.volume) ? Math.min(1, Math.max(0, cloudSettings.volume)) : 1)
     }
-    const storedTracks = await readStoredTracks()
-    const storedForOwner = session
-      ? storedTracks.filter((track) => track.ownerId === ownerId || (!track.ownerId && isPrimaryMusicAccount(session)))
-      : storedTracks.filter((track) => track.ownerId === ownerId || !track.ownerId)
-    let remoteTracks: CloudMusicTrack[] = session ? await listCloudMusic(session) : []
-    const builtInIds = new Set(builtInTracks.map((track) => track.id))
-    savedNames.current = Object.fromEntries(Object.entries(savedNames.current).filter(([id]) => builtInIds.has(id) || remoteTracks.some((track) => track.id === id) || storedForOwner.some((track) => track.id === id)))
-    for (const storedTrack of storedForOwner) {
-      if (!session || remoteTracks.some((track) => track.id === storedTrack.id)) continue
+    let storedTracks: StoredMusicTrack[] = []
+    try {
+      storedTracks = await readStoredTracks()
+    } catch {
+      // IndexedDB can be unavailable in private browsing or after storage
+      // quota failures. Built-in tracks should still remain usable.
+      setMessage('本機歌單保存暫時不可用，但內建歌曲仍可播放。')
+    }
+    if (session) {
       try {
-        const uploaded = await uploadCloudMusic(new File([storedTrack.blob], `${storedTrack.name}.mp3`, { type: storedTrack.blob.type || 'audio/mpeg' }), storedTrack.name, storedTrack.id, session)
-        remoteTracks = [...remoteTracks, uploaded]
-        await deleteStoredTrack(storedTrack.id)
+        const remoteTracks = await listCloudMusic(session)
+        for (const remoteTrack of remoteTracks) {
+          await deleteCloudMusic(remoteTrack.id, session).catch(() => undefined)
+        }
       } catch {
-        // Keep the local copy if migration cannot reach the cloud.
+        setMessage('雲端額外 MP3 清理失敗，本機仍會只顯示最初 40 首歌曲。')
       }
     }
-    const localTracks: MusicTrack[] = storedForOwner.map((track) => {
-      const src = URL.createObjectURL(track.blob)
-      objectUrlsRef.current.push(src)
-      return { id: track.id, name: savedNames.current[track.id] ?? track.name, src, local: true, createdAt: track.createdAt }
-    })
-    const customTracks: MusicTrack[] = remoteTracks.map((track) => ({ ...track, local: false }))
-    const availableTracks = isPrimaryMusicAccount(session) ? [...builtInTracks, ...customTracks, ...localTracks.filter((track) => !customTracks.some((remote) => remote.id === track.id))] : session ? [...customTracks, ...localTracks.filter((track) => !customTracks.some((remote) => remote.id === track.id))] : localTracks
-    const orderedTracks = applySavedOrder(availableTracks, readTrackOrder(ownerId))
+    for (const storedTrack of storedTracks) await deleteStoredTrack(storedTrack.id).catch(() => undefined)
+    storedTracks = []
+    const builtInIds = new Set(builtInTracks.map((track) => track.id))
+    savedNames.current = Object.fromEntries(Object.entries(savedNames.current).filter(([id]) => builtInIds.has(id)))
+    const orderedTracks = applySavedOrder(builtInTracks, savedOrder.current)
     savedOrder.current = orderedTracks.map((track) => track.id)
     if (loadId !== libraryLoadRef.current) return
     const allTracks = orderedTracks.map((track) => ({ ...track, name: savedNames.current[track.id] ?? track.name }))
     setTracks(allTracks)
     const savedIndex = allTracks.findIndex((track) => track.id === savedTrackId.current)
-    setCurrentIndex(savedIndex >= 0 ? savedIndex : 0)
+    if (savedIndex >= 0) setCurrentIndex(savedIndex)
     setCloudMusicReady(true)
-    setMessage(isPrimaryMusicAccount(session) ? `已載入 ${builtInTracks.length} 首帳號內建歌曲，可繼續新增 MP3。` : `${orderedTracks.length} 首歌曲已載入，可繼續新增 MP3。`)
+    setMessage(`已固定載入最初的 ${builtInTracks.length} 首內建歌曲。`)
   }
 
   useEffect(() => {
-    loadMusicLibrary(cloudSession).catch(() => setMessage('無法載入播放設定，但仍可播放內建歌曲。'))
+    if (!('indexedDB' in window)) {
+      setMessage('此瀏覽器不支援音檔保存，仍可播放目前音樂。')
+      return
+    }
+    loadMusicLibrary(cloudSession).catch(() => setMessage('無法啟用歌單保存，但仍可播放內建歌曲。'))
     const reload = () => {
       const nextSession = getCloudSession()
       setCloudSession(nextSession)
@@ -238,21 +218,23 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
     return () => { libraryLoadRef.current += 1; unsubscribe(); window.removeEventListener('cultivation-companion-cloud-ready', reload) }
   }, [])
 
-  useEffect(() => () => { objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url)); if (nextTimerRef.current !== null) window.clearTimeout(nextTimerRef.current) }, [])
-  useEffect(() => { queueCloudMusicSettings() }, [playMode, currentTrack?.id, volume, tracks, cloudSession, cloudMusicReady])
-  useEffect(() => { if (audioRef.current) audioRef.current.volume = soundEnabled ? volume : 0 }, [currentTrack?.id, volume, soundEnabled])
+  useEffect(() => () => {
+    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
+    if (nextTimerRef.current !== null) window.clearTimeout(nextTimerRef.current)
+  }, [])
+  useEffect(() => { queueCloudMusicSettings() }, [playMode, currentTrack.id, volume, tracks, cloudSession, cloudMusicReady])
+  useEffect(() => { if (audioRef.current) audioRef.current.volume = soundEnabled ? volume : 0 }, [currentTrack.id, volume, soundEnabled])
 
   useEffect(() => {
     const audio = audioRef.current
     if (!audio) return
     audioRecoveryRef.current = false
-    if (!currentTrack) return
     const resolvedSource = new URL(currentTrack.src, window.location.href).href
     if (audio.src !== resolvedSource) {
-      audio.src = displayTrack.src
+      audio.src = currentTrack.src
       audio.load()
     }
-  }, [currentTrack?.src])
+  }, [currentTrack.src])
 
   const playlistCountLabel = useMemo(() => `${tracks.length} 首歌曲`, [tracks.length])
 
@@ -399,14 +381,13 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
 
   const reorderTracks = (fromIndex: number, toIndex: number) => {
     if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= tracks.length || toIndex >= tracks.length) return
-    const activeId = displayTrack.id
+    const activeId = currentTrack.id
     const nextTracks = [...tracks]
     const [movedTrack] = nextTracks.splice(fromIndex, 1)
     nextTracks.splice(toIndex, 0, movedTrack)
     setTracks(nextTracks)
     setCurrentIndex(nextTracks.findIndex((track) => track.id === activeId))
-    localStorage.setItem(musicStorageKey(MUSIC_ORDER_KEY, cloudSession?.userId), JSON.stringify(nextTracks.map((track) => track.id)))
-    queueCloudMusicSettings({ order: nextTracks.map((track) => track.id) })
+    localStorage.setItem(MUSIC_ORDER_KEY, JSON.stringify(nextTracks.map((track) => track.id)))
   }
 
   const startRenaming = (track: MusicTrack) => {
@@ -424,63 +405,62 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
     setMessage('歌曲名稱已更新，音檔內容沒有變更。')
   }
 
-  const handleFileSelection = async (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? [])
-    event.target.value = ''
-    if (!files.length) return
-    const ownerId = cloudSession?.userId ?? 'anonymous'
-    let added = 0
-    for (const file of files) {
-      if (!file.name.toLowerCase().endsWith('.mp3') && file.type !== 'audio/mpeg') continue
-      const id = `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      const name = file.name.replace(/\.mp3$/i, '').trim() || `未命名歌曲 ${added + 1}`
-      await saveStoredTrack({ id, name, blob: file, createdAt: Date.now(), ownerId })
-      const src = URL.createObjectURL(file)
-      objectUrlsRef.current.push(src)
-      let track: MusicTrack = { id, name, src, local: true, createdAt: Date.now() }
-      if (cloudSession) {
-        try {
-          const remote = await uploadCloudMusic(file, name, id, cloudSession)
-          track = { ...remote, local: true }
-        } catch (error) {
-          setMessage(error instanceof Error ? `${name} 已保存在本機，但雲端上傳失敗。` : `${name} 已保存在本機。`)
-        }
-      }
-      setTracks((current) => [...current, track])
-      added += 1
-    }
-    if (added) setMessage(cloudSession ? `已加入 ${added} 首 MP3；此帳號的歌單會同步到其他裝置。` : `已加入 ${added} 首 MP3；登入後可同步到其他裝置。`)
-    else setMessage('目前只支援 MP3 音檔。')
-  }
-
   const removeTrack = async (track: MusicTrack, index: number) => {
-    if (!track.local && builtInTracks.some((candidate) => candidate.id === track.id)) {
-      setMessage('帳號內建歌曲無法刪除。')
+    if (!track.local) {
+      setMessage('內建歌曲無法刪除。')
       return
     }
-    if (!window.confirm(`確定要刪除「${track.name}」嗎？`)) return
+    if (!window.confirm(`確定要刪除「${track.name}」嗎？刪除後會從這台裝置的歌單移除。`)) return
+
     if (nextTimerRef.current !== null) {
       window.clearTimeout(nextTimerRef.current)
       nextTimerRef.current = null
     }
-    if (index === currentIndex) {
+    if (audioRef.current && index === currentIndex) {
       playbackIntentRef.current = false
-      audioRef.current?.pause()
+      audioRef.current.pause()
+      audioRef.current.autoplay = false
     }
-    try { await deleteStoredTrack(track.id) } catch { /* Cloud copy can still be removed. */ }
-    if (cloudSession && !track.id.startsWith('local-')) {
-      try { await deleteCloudMusic(track.id, cloudSession) } catch { setMessage('本機歌曲已移除，但雲端刪除失敗，請重新登入後再試。') }
-    }
-    if (track.src.startsWith('blob:')) {
-      URL.revokeObjectURL(track.src)
-      objectUrlsRef.current = objectUrlsRef.current.filter((url) => url !== track.src)
-    }
+
     const nextTracks = tracks.filter((candidate) => candidate.id !== track.id)
-    const nextIndex = nextTracks.length ? Math.min(index, nextTracks.length - 1) : 0
+    const nextIndex = nextTracks.length === 0
+      ? 0
+      : index < currentIndex
+        ? currentIndex - 1
+        : Math.min(currentIndex, nextTracks.length - 1)
+    const nextCurrentTrackId = nextTracks[nextIndex]?.id ?? defaultTrack.id
+    savedNames.current = Object.fromEntries(Object.entries(savedNames.current).filter(([id]) => id !== track.id))
+    savedTrackId.current = nextCurrentTrackId
+
+    try {
+      await deleteStoredTrack(track.id)
+    } catch {
+      setMessage('刪除歌曲失敗，請稍後再試。')
+      return
+    }
+    let cloudDeleteFailed = false
+    if (cloudSession) {
+      try {
+        await deleteCloudMusic(track.id, cloudSession)
+      } catch {
+        cloudDeleteFailed = true
+      }
+    }
+
+    objectUrlsRef.current = objectUrlsRef.current.filter((url) => {
+      if (track.src.startsWith('blob:') && url === track.src) {
+        URL.revokeObjectURL(url)
+        return false
+      }
+      return true
+    })
     setTracks(nextTracks)
     setCurrentIndex(nextIndex)
-    savedNames.current = Object.fromEntries(Object.entries(savedNames.current).filter(([id]) => id !== track.id))
-    setMessage(`已刪除「${track.name}」。`)
+    setEditingTrackId(null)
+    const nextOrder = nextTracks.map((candidate) => candidate.id)
+    localStorage.setItem(MUSIC_ORDER_KEY, JSON.stringify(nextOrder))
+    queueCloudMusicSettings({ order: nextOrder, names: savedNames.current, currentTrackId: nextCurrentTrackId })
+    setMessage(cloudDeleteFailed ? '歌曲已從本機刪除，但雲端刪除失敗，請稍後重新同步。' : `已刪除「${track.name}」。`)
   }
 
   const handleVolumeChange = (event: React.SyntheticEvent<HTMLAudioElement>) => {
@@ -492,7 +472,7 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
     const audio = audioRef.current
     if (audio && !audioRecoveryRef.current) {
       audioRecoveryRef.current = true
-      audio.src = displayTrack.src
+      audio.src = currentTrack.src
       audio.load()
       setMessage('正在重新載入音樂…')
       if (playbackIntentRef.current) playTrackWhenReady(audio, document.hidden)
@@ -546,7 +526,6 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
   useEffect(() => {
     if (!('mediaSession' in navigator)) return
     const mediaSession = navigator.mediaSession
-    if (!currentTrack) return
     mediaSession.metadata = new MediaMetadata({ title: currentTrack.name, artist: '修仙伴讀', album: '靜心音律' })
     const play = () => {
       playbackIntentRef.current = true
@@ -583,7 +562,7 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
         // Ignore unsupported cleanup actions.
       }
     }
-  }, [currentTrack?.id, currentTrack?.name, playMode, tracks.length, currentIndex, soundEnabled])
+  }, [currentTrack.id, currentTrack.name, playMode, tracks.length, currentIndex, soundEnabled])
 
   useEffect(() => {
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
@@ -591,17 +570,16 @@ export function MusicPlayer({ soundEnabled }: { soundEnabled: boolean }) {
 
   return <section className="card music-player-card music-player-dock" style={position ? { left: position.left, top: position.top, right: 'auto', bottom: 'auto' } : undefined} aria-label="本機背景音樂播放器">
     <div className="music-dock-header music-drag-handle" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={stopDragging} onPointerCancel={stopDragging}>
-      <div className="music-track-info"><span className="music-track-icon">{isPlaying ? '♫' : '♪'}</span><div><strong>{currentTrack?.name ?? '尚未加入歌曲'}</strong><small>修仙伴讀背景音樂 · {playlistCountLabel}</small></div></div>
+      <div className="music-track-info"><span className="music-track-icon">{isPlaying ? '♫' : '♪'}</span><div><strong>{currentTrack.name}</strong><small>修仙伴讀背景音樂 · {playlistCountLabel}</small></div></div>
       <button type="button" className="text-button music-playlist-toggle" onClick={() => setShowPlaylist((current) => !current)}>{showPlaylist ? '收起歌單' : '查看歌單'}</button>
     </div>
-    {currentTrack ? <audio ref={audioRef} className="music-audio" src={currentTrack.src} controls preload="auto" playsInline aria-label={`播放 ${currentTrack.name}`} onPlay={() => { audioRecoveryRef.current = false; playbackIntentRef.current = true; if (audioRef.current) audioRef.current.autoplay = true; setIsPlaying(true) }} onPause={() => { const audio = audioRef.current; if (audio?.ended) return; setIsPlaying(false); window.setTimeout(() => { if (!audio || audio !== audioRef.current || audio.ended) return; if (document.hidden && playbackIntentRef.current) { audio.play().then(() => setIsPlaying(true)).catch(() => undefined); return } if (!document.hidden) playbackIntentRef.current = false }, 0) }} onVolumeChange={handleVolumeChange} onEnded={handleTrackEnded} onError={handleAudioError} /> : <div className="music-empty"><span>♫</span><p>目前沒有歌曲<br /><small>選擇 MP3 後即可建立自己的歌單。</small></p></div>}
+    <audio ref={audioRef} className="music-audio" src={currentTrack.src} controls preload="auto" playsInline aria-label={`播放 ${currentTrack.name}`} onPlay={() => { audioRecoveryRef.current = false; playbackIntentRef.current = true; if (audioRef.current) audioRef.current.autoplay = true; setIsPlaying(true) }} onPause={() => { const audio = audioRef.current; if (audio?.ended) return; setIsPlaying(false); window.setTimeout(() => { if (!audio || audio !== audioRef.current || audio.ended) return; if (document.hidden && playbackIntentRef.current) { audio.play().then(() => setIsPlaying(true)).catch(() => undefined); return } if (!document.hidden) playbackIntentRef.current = false }, 0) }} onVolumeChange={handleVolumeChange} onEnded={handleTrackEnded} onError={handleAudioError} />
     <div className="music-actions">
       <button type="button" className="soft-button" onClick={previousTrack} disabled={tracks.length < 2}>上一首</button>
       <button type="button" className="soft-button" onClick={() => nextTrack(false)} disabled={tracks.length < 2}>下一首</button>
-      <label className="soft-button music-file-button">加入 MP3<input type="file" accept="audio/mpeg,.mp3" multiple onChange={(event) => void handleFileSelection(event)} /></label>
       <select className="music-mode-select" value={playMode} onChange={(event) => setPlayMode(event.target.value as PlayMode)} aria-label="播放模式"><option value="sequential">依序播放</option><option value="shuffle">隨機播放</option></select>
     </div>
-    {showPlaylist && <div className="music-playlist">{tracks.map((track, index) => <div className={`music-playlist-item ${index === currentIndex ? 'active' : ''}`} data-playlist-index={index} key={track.id} onPointerDown={(event) => handlePlaylistPointerDown(index, event)} onPointerMove={handlePlaylistPointerMove} onPointerUp={stopPlaylistDragging} onPointerCancel={stopPlaylistDragging}><span>{index + 1}</span>{editingTrackId === track.id ? <input className="music-rename-input" value={editingName} onChange={(event) => setEditingName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') saveTrackName(track.id); if (event.key === 'Escape') setEditingTrackId(null) }} autoFocus /> : <button type="button" className="music-track-select" onClick={() => chooseTrack(index)}>{track.name}</button>}{editingTrackId === track.id ? <button type="button" className="music-rename-save" onClick={() => saveTrackName(track.id)}>保存</button> : <button type="button" className="music-rename-button" onClick={() => startRenaming(track)}>改名</button>}{track.local || !builtInTracks.some((candidate) => candidate.id === track.id) ? <button type="button" className="music-delete-button" onClick={() => void removeTrack(track, index)} aria-label={`刪除 ${track.name}`} title="刪除歌曲">刪除</button> : null}</div>)}</div>}
+    {showPlaylist && <div className="music-playlist">{tracks.map((track, index) => <div className={`music-playlist-item ${index === currentIndex ? 'active' : ''}`} data-playlist-index={index} key={track.id} onPointerDown={(event) => handlePlaylistPointerDown(index, event)} onPointerMove={handlePlaylistPointerMove} onPointerUp={stopPlaylistDragging} onPointerCancel={stopPlaylistDragging}><span>{index + 1}</span>{editingTrackId === track.id ? <input className="music-rename-input" value={editingName} onChange={(event) => setEditingName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') saveTrackName(track.id); if (event.key === 'Escape') setEditingTrackId(null) }} autoFocus /> : <button type="button" className="music-track-select" onClick={() => chooseTrack(index)}>{track.name}</button>}{editingTrackId === track.id ? <button type="button" className="music-rename-save" onClick={() => saveTrackName(track.id)}>保存</button> : <button type="button" className="music-rename-button" onClick={() => startRenaming(track)}>改名</button>}{track.local && <button type="button" className="music-delete-button" onClick={() => removeTrack(track, index)} aria-label={`刪除 ${track.name}`} title="刪除歌曲">刪除</button>}</div>)}</div>}
     <div className="music-footer"><span>{message}</span><span>{playMode === 'shuffle' ? '隨機播放' : '依序播放'} · 間隔 2 秒</span></div>
   </section>
 }
