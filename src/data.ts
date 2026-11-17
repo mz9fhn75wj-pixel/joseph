@@ -4,11 +4,11 @@ import { localDateKey } from './utils/date'
 const today = () => localDateKey()
 
 export const fruitCatalog: FruitStock[] = [
-  { id: 'fruit-ink', name: '墨香果', subject: '國文', icon: '✒', color: '#c79c75', progressMinutes: 0, targetMinutes: 60, readyCount: 0, totalHarvested: 0 },
-  { id: 'fruit-star', name: '星語果', subject: '英文', icon: '✦', color: '#8aa9d2', progressMinutes: 20, targetMinutes: 60, readyCount: 0, totalHarvested: 3 },
-  { id: 'fruit-abacus', name: '算盤果', subject: '數學', icon: '⊙', color: '#d4a95f', progressMinutes: 0, targetMinutes: 60, readyCount: 0, totalHarvested: 0 },
-  { id: 'fruit-spirit', name: '靈識果', subject: '專業科目', icon: '◈', color: '#9a83bb', progressMinutes: 0, targetMinutes: 60, readyCount: 0, totalHarvested: 0 },
-  { id: 'fruit-medicine', name: '玄醫果', subject: '醫學', icon: '✚', color: '#d28c93', progressMinutes: 0, targetMinutes: 60, readyCount: 0, totalHarvested: 0 },
+  { id: 'fruit-ink', name: '墨香果', subject: '國文', icon: '✒', color: '#c79c75', progressMinutes: 0, targetMinutes: 60, readyCount: 0, ownedCount: 0, totalHarvested: 0 },
+  { id: 'fruit-star', name: '星語果', subject: '英文', icon: '✦', color: '#8aa9d2', progressMinutes: 20, targetMinutes: 60, readyCount: 0, ownedCount: 0, totalHarvested: 3 },
+  { id: 'fruit-abacus', name: '算盤果', subject: '數學', icon: '⊙', color: '#d4a95f', progressMinutes: 0, targetMinutes: 60, readyCount: 0, ownedCount: 0, totalHarvested: 0 },
+  { id: 'fruit-spirit', name: '靈識果', subject: '專業科目', icon: '◈', color: '#9a83bb', progressMinutes: 0, targetMinutes: 60, readyCount: 0, ownedCount: 0, totalHarvested: 0 },
+  { id: 'fruit-medicine', name: '玄醫果', subject: '醫學', icon: '✚', color: '#d28c93', progressMinutes: 0, targetMinutes: 60, readyCount: 0, ownedCount: 0, totalHarvested: 0 },
 ]
 
 const subjectFruitAliases: Record<string, string> = {
@@ -149,7 +149,7 @@ export const initialGameState: GameState = {
     { id: 'task-2', title: '整理有機化學反應', subject: '有機化學', targetMinutes: 35, progressMinutes: 0, completed: false, createdDate: today() },
     { id: 'task-3', title: '完成醫用微積分題組', subject: '醫用微積分', targetMinutes: 30, progressMinutes: 30, completed: true, createdDate: today() },
   ],
-  fruitGarden: { fruits: fruitCatalog.map((fruit) => ({ ...fruit, progressMinutes: 0, readyCount: 0, totalHarvested: 0 })) },
+  fruitGarden: { fruits: fruitCatalog.map((fruit) => ({ ...fruit, progressMinutes: 0, readyCount: 0, ownedCount: 0, totalHarvested: 0 })) },
   collectionItems: [],
   explorationSessions: [],
   materials: [],

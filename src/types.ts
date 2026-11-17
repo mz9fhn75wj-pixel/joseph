@@ -84,6 +84,7 @@ export interface FruitStock {
   progressMinutes: number
   targetMinutes: number
   readyCount: number
+  ownedCount: number
   totalHarvested: number
 }
 

@@ -1,7 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { getSubjectReward } from '../data'
 import type { StudySubject } from '../types'
+
+export const STUDY_TIMER_STORAGE_KEY = 'cultivation-companion-active-study-timer-v1'
+
+export interface StudyTimerSnapshot {
+  subject: string
+  elapsedSeconds: number
+  started: boolean
+  savedAt: number
+}
+
+export function readStudyTimerSnapshot(): StudyTimerSnapshot | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(STUDY_TIMER_STORAGE_KEY) ?? 'null') as Partial<StudyTimerSnapshot> | null
+    if (!value || typeof value.subject !== 'string' || !value.started || typeof value.elapsedSeconds !== 'number' || !Number.isFinite(value.elapsedSeconds)) return null
+    return { subject: value.subject, elapsedSeconds: Math.max(0, Math.floor(value.elapsedSeconds)), started: true, savedAt: Number(value.savedAt) || Date.now() }
+  } catch {
+    return null
+  }
+}
+
+export function clearStudyTimerSnapshot() {
+  localStorage.removeItem(STUDY_TIMER_STORAGE_KEY)
+}
 
 interface StudyTimerProps {
   subject: string
@@ -10,69 +32,126 @@ interface StudyTimerProps {
   onComplete: (minutes: number, subject: string) => void
   onCancel?: () => void
   compact?: boolean
+  initialSnapshot?: StudyTimerSnapshot | null
 }
 
-const focusOptions = [25, 45, 60]
-
-export function StudyTimer({ subject, subjectCatalog, onSubjectChange, onComplete, onCancel, compact = false }: StudyTimerProps) {
-  const [selectedMinutes, setSelectedMinutes] = useState(25)
-  const [secondsLeft, setSecondsLeft] = useState(25 * 60)
+export function StudyTimer({ subject, subjectCatalog, onSubjectChange, onComplete, onCancel, compact = false, initialSnapshot }: StudyTimerProps) {
+  const restored = initialSnapshot?.started ? initialSnapshot : null
+  const [elapsedSeconds, setElapsedSeconds] = useState(restored?.elapsedSeconds ?? 0)
+  const [started, setStarted] = useState(Boolean(restored))
   const [running, setRunning] = useState(false)
-  const endAtRef = useRef<number | null>(null)
+  const elapsedRef = useRef(restored?.elapsedSeconds ?? 0)
+  const startedRef = useRef(Boolean(restored))
+  const runningRef = useRef(false)
+  const startedAtRef = useRef<number | null>(null)
+  const subjectRef = useRef(restored?.subject || subject)
+
+  const currentElapsed = () => {
+    const startedAt = startedAtRef.current
+    if (!runningRef.current || startedAt === null) return elapsedRef.current
+    return elapsedRef.current + Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+  }
+
+  const persist = (seconds = currentElapsed()) => {
+    const snapshot: StudyTimerSnapshot = { subject: subjectRef.current, elapsedSeconds: Math.max(0, Math.floor(seconds)), started: startedRef.current, savedAt: Date.now() }
+    if (snapshot.started) localStorage.setItem(STUDY_TIMER_STORAGE_KEY, JSON.stringify(snapshot))
+    else clearStudyTimerSnapshot()
+  }
+
+  const pause = () => {
+    const seconds = currentElapsed()
+    elapsedRef.current = seconds
+    setElapsedSeconds(seconds)
+    startedAtRef.current = null
+    runningRef.current = false
+    setRunning(false)
+    persist(seconds)
+  }
 
   useEffect(() => {
     if (!running) return
-    if (endAtRef.current === null) endAtRef.current = Date.now() + secondsLeft * 1000
     const tick = () => {
-      const remaining = Math.max(0, Math.ceil(((endAtRef.current ?? Date.now()) - Date.now()) / 1000))
-      setSecondsLeft(remaining)
-      if (remaining === 0) {
-        endAtRef.current = null
-        setRunning(false)
-        onComplete(selectedMinutes, subject)
-      }
+      const seconds = currentElapsed()
+      if (seconds === elapsedRef.current) return
+      elapsedRef.current = seconds
+      startedAtRef.current = Date.now()
+      setElapsedSeconds(seconds)
+      persist(seconds)
     }
     tick()
     const timer = window.setInterval(tick, 500)
     return () => window.clearInterval(timer)
-  }, [running, selectedMinutes, subject, onComplete])
+  }, [running])
 
-  const displayTime = useMemo(() => `${String(Math.floor(secondsLeft / 60)).padStart(2, '0')}:${String(secondsLeft % 60).padStart(2, '0')}`, [secondsLeft])
-  const progress = 100 - (secondsLeft / (selectedMinutes * 60)) * 100
-  const subjectMeta = useMemo(() => subjectCatalog.find((item) => item.name === subject), [subject, subjectCatalog])
-  const rewardPreview = getSubjectReward(subjectMeta, selectedMinutes)
+  useEffect(() => {
+    const pauseBeforeLeaving = () => { if (runningRef.current) pause() }
+    window.addEventListener('pagehide', pauseBeforeLeaving)
+    return () => {
+      window.removeEventListener('pagehide', pauseBeforeLeaving)
+      if (runningRef.current) pause()
+      else if (startedRef.current) persist()
+    }
+  }, [])
 
-  const chooseDuration = (minutes: number) => {
-    endAtRef.current = null
-    setSelectedMinutes(minutes)
-    setSecondsLeft(minutes * 60)
-    setRunning(false)
-  }
+  useEffect(() => {
+    if (!startedRef.current) subjectRef.current = subject
+  }, [subject])
+
+  const displayTime = useMemo(() => `${String(Math.floor(elapsedSeconds / 60)).padStart(2, '0')}:${String(elapsedSeconds % 60).padStart(2, '0')}`, [elapsedSeconds])
+  const progress = Math.min((elapsedSeconds / (60 * 60)) * 100, 100)
+  const subjectMeta = useMemo(() => subjectCatalog.find((item) => item.name === (started ? subjectRef.current : subject)), [subject, subjectCatalog, started])
 
   const reset = () => {
-    endAtRef.current = null
-    setSecondsLeft(selectedMinutes * 60)
+    startedAtRef.current = null
+    elapsedRef.current = 0
+    startedRef.current = false
+    runningRef.current = false
+    setElapsedSeconds(0)
+    setStarted(false)
     setRunning(false)
+    clearStudyTimerSnapshot()
   }
 
   const toggleRunning = () => {
-    if (!running) {
-      endAtRef.current = null
-      setRunning(true)
+    if (runningRef.current) {
+      pause()
       return
     }
-    const remaining = Math.max(0, Math.ceil(((endAtRef.current ?? Date.now()) - Date.now()) / 1000))
-    endAtRef.current = null
-    setSecondsLeft(remaining)
+    subjectRef.current = subject
+    startedRef.current = true
+    runningRef.current = true
+    startedAtRef.current = Date.now()
+    setStarted(true)
+    setRunning(true)
+    persist(elapsedRef.current)
+  }
+
+  const settle = () => {
+    const seconds = currentElapsed()
+    const minutes = Math.floor(seconds / 60)
+    if (minutes < 1) return
+    elapsedRef.current = seconds
+    startedAtRef.current = null
+    runningRef.current = false
+    startedRef.current = false
+    setElapsedSeconds(seconds)
     setRunning(false)
+    setStarted(false)
+    clearStudyTimerSnapshot()
+    onComplete(minutes, subjectRef.current)
+  }
+
+  const close = () => {
+    if (runningRef.current) pause()
+    else if (startedRef.current) persist()
+    onCancel?.()
   }
 
   return <div className={`timer-card ${compact ? 'compact' : ''}`}>
-    <div className="timer-topline"><span className="eyebrow">靜心入定</span><span className="timer-status"><i className={running ? 'status-live' : ''} />{running ? '修煉中' : '準備開始'}</span></div>
+    <div className="timer-topline"><span className="eyebrow">靜心入定</span><span className="timer-status"><i className={running ? 'status-live' : ''} />{running ? '修煉中' : started ? '已暫停' : '準備開始'}</span></div>
     <div className="timer-ring" style={{ '--progress': `${progress * 3.6}deg` } as CSSProperties}><div className="timer-inner"><span className="timer-time">{displayTime}</span><span className="timer-caption">專注時辰</span></div></div>
-    <div className="subject-select"><label htmlFor="subject">本次修煉科目</label><select id="subject" value={subject} onChange={(event) => onSubjectChange(event.target.value)} disabled={running}>{subjectCatalog.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><div className="subject-reward"><span>{subjectMeta?.difficulty ?? '入門'} · {subjectMeta?.quality ?? '普通'}</span><strong>預計 +{rewardPreview.exp} 修為 · +{rewardPreview.stones} 靈石</strong></div></div>
-    <div className="duration-row">{focusOptions.map((minutes) => <button key={minutes} className={selectedMinutes === minutes ? 'selected' : ''} onClick={() => chooseDuration(minutes)} disabled={running}>{minutes} 分鐘</button>)}</div>
-    <div className="timer-controls"><button className="primary-button timer-button" onClick={toggleRunning}>{running ? '暫停修煉' : secondsLeft < selectedMinutes * 60 ? '繼續修煉' : '開始修煉'} <span>{running ? 'Ⅱ' : '▶'}</span></button>{secondsLeft < selectedMinutes * 60 && <button className="reset-button" onClick={reset}>重設</button>}{onCancel && <button className="reset-button" onClick={onCancel}>關閉</button>}</div>
-    <p className="timer-tip">完成專注後，可獲得修為經驗與靈石獎勵。</p>
+    <div className="subject-select"><label htmlFor="subject">本次修煉科目</label><select id="subject" value={started ? subjectRef.current : subject} onChange={(event) => { subjectRef.current = event.target.value; onSubjectChange(event.target.value) }} disabled={started}>{subjectCatalog.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><div className="subject-reward"><span>{subjectMeta?.difficulty ?? '入門'} · {subjectMeta?.quality ?? '普通'}</span><strong>結算時依實際讀書分鐘計算獎勵</strong></div></div>
+    <div className="timer-controls"><button className="primary-button timer-button" onClick={toggleRunning}>{running ? '暫停修煉' : started ? '繼續修煉' : '開始修煉'} <span>{running ? 'Ⅱ' : '▶'}</span></button>{started && <><button className="primary-button timer-button" onClick={settle} disabled={Math.floor(currentElapsed() / 60) < 1}>結算修煉 <span>✓</span></button><button className="reset-button" onClick={reset}>重設</button></>}{onCancel && <button className="reset-button" onClick={close}>關閉</button>}</div>
+    <p className="timer-tip">開始後從 0:00 累積；可隨時暫停，結算後會依實際分鐘給予修為、靈石與靈果。</p>
   </div>
 }

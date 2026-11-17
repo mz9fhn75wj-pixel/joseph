@@ -43,11 +43,11 @@ export function loadGameState(fallback: GameState): GameState {
       .filter((task) => !removedLegacySubjects.has(task.subject))
       .filter((task) => !task.createdDate || task.createdDate === taskDate)
       .map((task) => ({ ...task, createdDate: task.createdDate ?? taskDate, progressMinutes: Math.min(task.targetMinutes, task.progressMinutes ?? (task.completed ? task.targetMinutes : 0)) }))
-    const savedFruit = parsed.fruitGarden as (Partial<GameState['fruitGarden']> & { fruitName?: string; progressMinutes?: number; targetMinutes?: number; readyCount?: number; totalHarvested?: number }) | undefined
+    const savedFruit = parsed.fruitGarden as (Partial<GameState['fruitGarden']> & { fruitName?: string; progressMinutes?: number; targetMinutes?: number; readyCount?: number; ownedCount?: number; totalHarvested?: number }) | undefined
     const savedFruitRows = savedFruit && Array.isArray(savedFruit.fruits)
       ? savedFruit.fruits
-      : fruitCatalog.map((fruit, index) => ({ ...fruit, progressMinutes: index === 1 ? savedFruit?.progressMinutes ?? fruit.progressMinutes : fruit.progressMinutes, readyCount: index === 1 ? savedFruit?.readyCount ?? fruit.readyCount : fruit.readyCount, totalHarvested: index === 1 ? savedFruit?.totalHarvested ?? fruit.totalHarvested : fruit.totalHarvested }))
-    const fruitGarden = { fruits: fruitCatalog.map((fruit) => { const rows = savedFruitRows.filter((row) => getFruitKind(row.subject ?? row.name, row.id).id === fruit.id || row.id === fruit.id); const rawProgress = rows.reduce((sum, row) => sum + row.progressMinutes, 0); return { ...fruit, progressMinutes: rawProgress % fruit.targetMinutes, readyCount: rows.reduce((sum, row) => sum + row.readyCount, 0) + Math.floor(rawProgress / fruit.targetMinutes), totalHarvested: rows.reduce((sum, row) => sum + row.totalHarvested, 0) } }) }
+      : fruitCatalog.map((fruit, index) => ({ ...fruit, progressMinutes: index === 1 ? savedFruit?.progressMinutes ?? fruit.progressMinutes : fruit.progressMinutes, readyCount: index === 1 ? savedFruit?.readyCount ?? fruit.readyCount : fruit.readyCount, ownedCount: index === 1 ? savedFruit?.ownedCount ?? 0 : 0, totalHarvested: index === 1 ? savedFruit?.totalHarvested ?? fruit.totalHarvested : fruit.totalHarvested }))
+    const fruitGarden = { fruits: fruitCatalog.map((fruit) => { const rows = savedFruitRows.filter((row) => getFruitKind(row.subject ?? row.name, row.id).id === fruit.id || row.id === fruit.id); const rawProgress = rows.reduce((sum, row) => sum + (row.progressMinutes ?? 0), 0); return { ...fruit, progressMinutes: rawProgress % fruit.targetMinutes, readyCount: rows.reduce((sum, row) => sum + (row.readyCount ?? 0), 0) + Math.floor(rawProgress / fruit.targetMinutes), ownedCount: rows.reduce((sum, row) => sum + (row.ownedCount ?? 0), 0), totalHarvested: rows.reduce((sum, row) => sum + (row.totalHarvested ?? 0), 0) } }) }
     const totalExp = (parsed.sessions ?? []).reduce((sum, session) => sum + (session.rewardExp ?? session.minutes * 10), 0) + 500
     const inferredRealmIndex = [...realmData].reverse().findIndex((realm) => totalExp >= realm.requirement)
     const fallbackRealmIndex = inferredRealmIndex < 0 ? 0 : realmData.length - 1 - inferredRealmIndex
@@ -91,7 +91,7 @@ export function loadGameState(fallback: GameState): GameState {
         materials: [],
         collectionItems: [],
         explorationSessions: [],
-        fruitGarden: { fruits: fruitCatalog.map((fruit) => ({ ...fruit, progressMinutes: 0, readyCount: 0, totalHarvested: 0 })) },
+        fruitGarden: { fruits: fruitCatalog.map((fruit) => ({ ...fruit, progressMinutes: 0, readyCount: 0, ownedCount: 0, totalHarvested: 0 })) },
         pet: { ...state.pet, hunger: 100, mood: 100, energy: 100, intimacy: 100, combatStats: { attack: 0, defense: 0, spirit: 0, agility: 0 } },
         achievements: achievementCatalog.map((achievement) => ({ id: achievement.id, progress: 0, claimed: false })),
         lastInteractionSlot: null,

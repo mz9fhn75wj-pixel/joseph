@@ -3,7 +3,7 @@ import type { FormEvent, ReactNode } from 'react'
 import { Layout } from './components/Layout'
 import { PetCard } from './components/PetCard'
 import { ProgressCard } from './components/ProgressCard'
-import { StudyTimer } from './components/StudyTimer'
+import { readStudyTimerSnapshot, StudyTimer } from './components/StudyTimer'
 import { FruitGardenCard } from './components/FruitGardenCard'
 import { WorldExploreCard } from './components/WorldExploreCard'
 import { DailyTasksCard } from './components/DailyTasksCard'
@@ -14,7 +14,7 @@ import { StatisticsPanel } from './components/StatisticsPanel'
 import { achievementCatalog, createDailyTasks, difficultyOptions, furnitureCatalog, fruitCatalog, getFruitKind, getMedicalCourseProfile, getMedicalFruitTypeId, getSubjectReward, initialGameState, medicalRequiredCourses, petRecipes, qualityOptions, rareWorldFinds, realmData } from './data'
 import { clearStudyAndAchievementTestData, clearStudyTestData, loadGameState, makeId, PET_ACHIEVEMENT_RESET_KEY, resetPetAndAchievements, saveGameState, TEST_STUDY_DATA_CLEANUP_KEY } from './utils/storage'
 import { playSound, readSoundEnabled, setSoundEnabled } from './utils/sound'
-import { getCloudSession, loadCloudSnapshot, saveCloudSnapshot, signInCloud, signOutCloud, signUpCloud, type CloudSession } from './utils/cloudSync'
+import { getCloudSession, loadCloudSnapshot, onCloudSessionChange, saveCloudSnapshot, signInCloud, signOutCloud, signUpCloud, type CloudSession } from './utils/cloudSync'
 import { localDateKey } from './utils/date'
 import type { GameState, Subject, SubjectDifficulty, SubjectQuality, View } from './types'
 
@@ -51,16 +51,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
+function normalizeFruitInventory(state: GameState): GameState {
+  const savedFruits = state.fruitGarden?.fruits ?? []
+  return { ...state, fruitGarden: { fruits: fruitCatalog.map((template) => { const saved = savedFruits.find((fruit) => fruit.id === template.id); return { ...template, ...saved, ownedCount: saved?.ownedCount ?? 0 } }) } }
+}
+
 function App() {
-  const [activeView, setActiveView] = useState<View>('home')
+  const [activeView, setActiveView] = useState<View>(() => readStudyTimerSnapshot() ? 'study' : 'home')
   const [game, setGame] = useState<GameState>(() => {
     const saved = syncAchievements(loadGameState(initialGameState))
     return saved.dailyTaskDate === today() ? saved : { ...saved, dailyTasks: createDailyTasks(), dailyTaskDate: today() }
   })
-  const [selectedSubject, setSelectedSubject] = useState<Exclude<Subject, '全部'>>(medicalRequiredCourses[0]?.name ?? '')
+  const [selectedSubject, setSelectedSubject] = useState<Exclude<Subject, '全部'>>(() => (readStudyTimerSnapshot()?.subject as Exclude<Subject, '全部'> | undefined) ?? medicalRequiredCourses[0]?.name ?? '')
   const [toast, setToast] = useState('')
   const [soundEnabled, setSoundEnabledState] = useState(readSoundEnabled)
-  const [showTimer, setShowTimer] = useState(false)
+  const [showTimer, setShowTimer] = useState(() => Boolean(readStudyTimerSnapshot()))
   const [filter, setFilter] = useState<Subject>('全部')
   const [showAddSubject, setShowAddSubject] = useState(false)
   const [newSubjectName, setNewSubjectName] = useState('')
@@ -70,6 +75,8 @@ function App() {
   const [cloudSession, setCloudSession] = useState<CloudSession | null>(() => getCloudSession())
   const [cloudReady, setCloudReady] = useState(false)
   const [cloudStatus, setCloudStatus] = useState('')
+
+  useEffect(() => onCloudSessionChange(setCloudSession), [])
 
   useEffect(() => {
     saveGameState(game)
@@ -91,7 +98,7 @@ function App() {
     loadCloudSnapshot(cloudSession).then((snapshot) => {
       if (cancelled) return
       if (snapshot) {
-        let cloudState = snapshot.state
+        let cloudState = normalizeFruitInventory(snapshot.state)
         let shouldSaveCleanCloudState = false
         if (localStorage.getItem(CLOUD_TEST_STUDY_DATA_CLEANUP_KEY) !== 'done') {
           cloudState = clearStudyAndAchievementTestData(cloudState)
@@ -232,7 +239,7 @@ function App() {
     if (!cloudSession) return
     const snapshot = await loadCloudSnapshot(cloudSession)
     if (!snapshot) return setCloudStatus('雲端目前沒有存檔。')
-    setGame(syncAchievements(snapshot.state))
+    setGame(syncAchievements(normalizeFruitInventory(snapshot.state)))
     setCloudReady(true)
     setCloudStatus('已下載雲端進度。')
     addToast('雲端進度已載入。')
@@ -252,12 +259,11 @@ function App() {
       const existingFruit = current.fruitGarden.fruits.find((fruit) => fruit.id === fruitKind.id) ?? fruitKind
       const totalFruitMinutes = existingFruit.progressMinutes + minutes
       grownFruit = Math.floor(totalFruitMinutes / existingFruit.targetMinutes)
-      const fruitCombatBoost = ({ 'fruit-ink': { defense: 1 }, 'fruit-star': { agility: 1 }, 'fruit-abacus': { attack: 1 }, 'fruit-spirit': { spirit: 1 }, 'fruit-medicine': { defense: 1, spirit: 1 } } as Record<string, Partial<GameState['pet']['combatStats']>>)[fruitKind.id] ?? {}
       return {
         ...current,
         cultivationExp: current.cultivationExp + reward.exp,
         spiritStones: current.spiritStones + reward.stones,
-        pet: { ...current.pet, energy: Math.max(15, current.pet.energy - Math.round(minutes / 4)), mood: Math.min(100, current.pet.mood + 5), intimacy: Math.min(100, current.pet.intimacy + Math.min(10, Math.round(minutes / 5))), combatStats: { ...current.pet.combatStats, ...fruitCombatBoost } },
+        pet: { ...current.pet, energy: Math.max(15, current.pet.energy - Math.round(minutes / 4)), mood: Math.min(100, current.pet.mood + 5), intimacy: Math.min(100, current.pet.intimacy + Math.min(10, Math.round(minutes / 5))) },
         sessions: [...current.sessions, { id: makeId('session'), subject, minutes, difficulty: reward.difficulty, quality: reward.quality, rewardExp: reward.exp, rewardStones: reward.stones, completedAt: new Date().toISOString() }],
         tasks: current.tasks.map((task) => task.subject === subject && !task.completed ? { ...task, progressMinutes: Math.min(task.targetMinutes, (task.progressMinutes ?? 0) + minutes) } : task),
         fruitGarden: { fruits: [...current.fruitGarden.fruits.filter((fruit) => fruit.id !== fruitKind.id), { ...existingFruit, progressMinutes: totalFruitMinutes % existingFruit.targetMinutes, readyCount: existingFruit.readyCount + grownFruit }] },
@@ -271,8 +277,8 @@ function App() {
 
   const feedPet = (fruitId: string) => {
     const fruit = game.fruitGarden.fruits.find((item) => item.id === fruitId)
-    if (!fruit || fruit.readyCount <= 0) return addToast('目前沒有可餵食的成熟靈果，先完成讀書累積靈果吧！')
-    updateGame((current) => ({ ...current, pet: { ...current.pet, hunger: Math.min(100, current.pet.hunger + 12), mood: Math.min(100, current.pet.mood + 2) }, fruitGarden: { fruits: current.fruitGarden.fruits.map((item) => item.id === fruitId ? { ...item, readyCount: item.readyCount - 1 } : item) }, dailyTasks: addDailyProgress(current.dailyTasks, 'feedPet', 1), lifetimeStats: { ...current.lifetimeStats, feedCount: current.lifetimeStats.feedCount + 1 } }))
+    if (!fruit || fruit.ownedCount <= 0) return addToast('目前沒有可餵食的靈果，先採收成熟靈果吧！')
+    updateGame((current) => ({ ...current, pet: { ...current.pet, hunger: Math.min(100, current.pet.hunger + 12), mood: Math.min(100, current.pet.mood + 2) }, fruitGarden: { fruits: current.fruitGarden.fruits.map((item) => item.id === fruitId ? { ...item, ownedCount: item.ownedCount - 1 } : item) }, dailyTasks: addDailyProgress(current.dailyTasks, 'feedPet', 1), lifetimeStats: { ...current.lifetimeStats, feedCount: current.lifetimeStats.feedCount + 1 } }))
     addToast(`餵食${fruit.name}成功，噗比的飽食度提升了！`)
     playSound('feed', soundEnabled)
   }
@@ -324,7 +330,7 @@ function App() {
       const importedSubjects = courses.map((course, index) => ({ id: course.id, name: course.name, ...getMedicalCourseProfile(course), year: course.year, semester: course.semester, credits: course.credits, fruitTypeId: getMedicalFruitTypeId(course, index), source: '長庚大學醫學系 115 學年度必選修科目表' }))
       const knownNames = new Set(current.subjects.map((subject) => subject.name))
       const newSubjects = importedSubjects.filter((subject) => !knownNames.has(subject.name))
-      const fruits = fruitCatalog.map((template) => { const existing = current.fruitGarden.fruits.find((fruit) => fruit.id === template.id); return existing ? { ...template, progressMinutes: existing.progressMinutes, readyCount: existing.readyCount, totalHarvested: existing.totalHarvested } : { ...template } })
+      const fruits = fruitCatalog.map((template) => { const existing = current.fruitGarden.fruits.find((fruit) => fruit.id === template.id); return existing ? { ...template, progressMinutes: existing.progressMinutes, readyCount: existing.readyCount, ownedCount: existing.ownedCount, totalHarvested: existing.totalHarvested } : { ...template } })
       return { ...current, subjects: [...current.subjects, ...newSubjects], fruitGarden: { fruits } }
     })
     addToast(`已套入醫學系大${year}課程，共 ${courses.length} 門必修，並建立對應靈果`)
@@ -332,8 +338,9 @@ function App() {
   const harvestFruit = (fruitId: string) => {
     const selectedFruit = game.fruitGarden.fruits.find((fruit) => fruit.id === fruitId)
     if (!selectedFruit || selectedFruit.readyCount === 0) return
-    updateGame((current) => ({ ...current, spiritStones: current.spiritStones + selectedFruit.readyCount * 15, fruitGarden: { fruits: current.fruitGarden.fruits.map((fruit) => fruit.id === fruitId ? { ...fruit, totalHarvested: fruit.totalHarvested + fruit.readyCount, readyCount: 0 } : fruit) }, dailyTasks: addDailyProgress(current.dailyTasks, 'harvestFruit', selectedFruit.readyCount) }))
-    addToast(`採收${selectedFruit.name}成功！獲得 ${selectedFruit.readyCount * 15} 顆靈石`)
+    const quantity = selectedFruit.readyCount
+    updateGame((current) => ({ ...current, fruitGarden: { fruits: current.fruitGarden.fruits.map((fruit) => fruit.id === fruitId ? { ...fruit, totalHarvested: fruit.totalHarvested + quantity, readyCount: 0, ownedCount: fruit.ownedCount + quantity } : fruit) }, dailyTasks: addDailyProgress(current.dailyTasks, 'harvestFruit', quantity) }))
+    addToast(`採收${selectedFruit.name}成功！已放入靈果背包，可自行餵食或製作配方。`)
   }
   const exploreWorld = (activity: string, minutes: number) => {
     const find = rareWorldFinds[Math.floor(Math.random() * rareWorldFinds.length)]
@@ -418,7 +425,7 @@ function App() {
   const filteredTasks = useMemo(() => game.tasks.filter((task) => filter === '全部' || task.subject === filter), [filter, game.tasks])
 
   return <Layout activeView={activeView} onNavigate={setActiveView} playerName={game.playerName} onPlayerNameChange={renamePlayer} pet={game.pet} notice={toast} soundEnabled={soundEnabled} onSoundToggle={toggleSound} onExportSave={exportSave} onImportSave={importSave} onResetSave={resetSave} cloudSession={cloudSession} cloudStatus={cloudStatus} onCloudSignIn={handleCloudSignIn} onCloudSignUp={handleCloudSignUp} onCloudSignOut={handleCloudSignOut} onCloudUpload={uploadCloudSave} onCloudDownload={downloadCloudSave}>
-    {activeView === 'home' && <HomeView game={game} currentRealm={currentRealm} onStart={() => setShowTimer(true)} onFeed={feedPet} onPlay={playWithPet} onHarvestFruit={harvestFruit} onExplore={exploreWorld} onClaimTask={claimDailyTask} interactionAvailable={interactionAvailable} interactionLabel={`下次 ${interactionSlot.nextReset}`} />}
+    {activeView === 'home' && <HomeView game={game} currentRealm={currentRealm} onStart={() => { setActiveView('study'); setShowTimer(true) }} onFeed={feedPet} onPlay={playWithPet} onHarvestFruit={harvestFruit} onExplore={exploreWorld} onClaimTask={claimDailyTask} interactionAvailable={interactionAvailable} interactionLabel={`下次 ${interactionSlot.nextReset}`} />}
     {activeView === 'study' && <StudyView game={game} selectedSubject={selectedSubject} setSelectedSubject={setSelectedSubject} showTimer={showTimer} setShowTimer={setShowTimer} onComplete={handleComplete} filter={filter} setFilter={setFilter} tasks={filteredTasks} onAddTask={addStudyTask} onConfirmTask={confirmStudyTask} onDeleteTask={deleteStudyTask} showAddSubject={showAddSubject} setShowAddSubject={setShowAddSubject} newSubjectName={newSubjectName} setNewSubjectName={setNewSubjectName} newSubjectDifficulty={newSubjectDifficulty} setNewSubjectDifficulty={setNewSubjectDifficulty} newSubjectQuality={newSubjectQuality} setNewSubjectQuality={setNewSubjectQuality} addSubject={addSubject} />}
     {activeView === 'cultivation' && <CultivationView game={game} currentRealm={currentRealm} nextRealm={nextRealm} totalExp={totalExp} realmIndex={realmIndex} canBreakthrough={safeRealmIndex < highestRealmIndex} onBreakthrough={breakthrough} />}
     {activeView === 'cave' && <CaveView game={game} onHarvestFruit={harvestFruit} onCraft={craftRecipe} onImportMedicalYear={importMedicalYear} onStart={() => setActiveView('study')} onBuyFurniture={buyFurniture} onToggleFurniture={toggleFurniturePlacement} />}
@@ -448,7 +455,7 @@ function LegacyStudyView({ game, selectedSubject, setSelectedSubject, showTimer,
     const key = localDateKey(date)
     return game.sessions.filter((session) => session.completedAt.slice(0, 10) === key).reduce((sum, session) => sum + session.minutes, 0)
   })
-  return <><PageHeader eyebrow="伴讀修煉" title="把專注變成修為" description="選一個科目，讓噗比陪你完成今天的學習目標。" action={<button className="primary-button" onClick={() => setShowTimer(true)}>開始計時 <span>◷</span></button>} /><div className="study-layout"><section className="card study-overview"><div className="card-heading"><div><span className="eyebrow">本週修煉紀錄</span><h2>循序漸進，自有所得</h2></div><span className="week-total">{game.sessions.reduce((sum, session) => sum + session.minutes, 0)} 分鐘</span></div><div className="week-bars">{['一', '二', '三', '四', '五', '六', '日'].map((day, index) => { const height = [45, 72, 32, 88, 62, 18, 0][index]; return <div className="week-bar" key={day}><div className="bar-track"><span style={{ height: `${height}%` }} /></div><small>{day}</small></div> })}</div><div className="study-legend"><span><i className="legend-dot mint" />專注時間</span><span>目標 {game.dailyGoal} 分鐘／日</span></div></section><section className="card task-card"><div className="card-heading"><div><span className="eyebrow">修煉功課</span><h2>今日任務</h2></div><button className="text-button" onClick={() => setShowAddSubject(!showAddSubject)}>＋ 自訂科目</button></div>{showAddSubject && <div className="add-subject-form"><input value={newSubjectName} onChange={(event) => setNewSubjectName(event.target.value)} placeholder="例如：日文、吉他、閱讀" maxLength={18} /><div><select value={newSubjectDifficulty} onChange={(event) => setNewSubjectDifficulty(event.target.value as SubjectDifficulty)}>{difficultyOptions.map((item) => <option key={item}>{item}</option>)}</select><select value={newSubjectQuality} onChange={(event) => setNewSubjectQuality(event.target.value as SubjectQuality)}>{qualityOptions.map((item) => <option key={item}>{item}</option>)}</select><button className="soft-button" onClick={addSubject}>加入科目</button></div><small>難度與品質會影響完成讀書後的修為、靈石獎勵。</small></div>}<div className="filter-row">{filterSubjects.map((item) => <button key={item} className={filter === item ? 'active' : ''} onClick={() => setFilter(item)}>{item}</button>)}</div><div className="task-list">{tasks.map((task) => <button className={`task-item ${task.completed ? 'completed' : ''}`} key={task.id} onClick={() => toggleTask(task.id)}><span className="check-circle">{task.completed ? '✓' : ''}</span><span className="task-copy"><strong>{task.title}</strong><small>{task.subject} · {task.targetMinutes} 分鐘</small></span><span className="task-arrow">→</span></button>)}</div></section><section className="card history-card"><div className="card-heading"><div><span className="eyebrow">最近入定</span><h2>學習紀錄</h2></div><span className="history-count">{game.sessions.length} 次</span></div><div className="history-list">{[...game.sessions].reverse().slice(0, 5).map((session) => <div className="history-item" key={session.id}><span className="history-icon">✧</span><div><strong>{session.subject}專注修煉</strong><small>{session.difficulty} · {session.quality} · {new Date(session.completedAt).toLocaleDateString('zh-TW', { month: 'short', day: 'numeric' })}</small></div><b>+{session.rewardExp ?? session.minutes * 10} 修為</b></div>)}</div></section></div>{showTimer && <div className="modal-backdrop"><div className="timer-modal"><button className="modal-close" onClick={() => setShowTimer(false)}>×</button><StudyTimer subject={selectedSubject} subjectCatalog={game.subjects} onSubjectChange={setSelectedSubject} onComplete={onComplete} onCancel={() => setShowTimer(false)} /></div></div>}</>
+  return <><PageHeader eyebrow="伴讀修煉" title="把專注變成修為" description="選一個科目，讓噗比陪你完成今天的學習目標。" action={<button className="primary-button" onClick={() => setShowTimer(true)}>開始計時 <span>◷</span></button>} /><div className="study-layout"><section className="card study-overview"><div className="card-heading"><div><span className="eyebrow">本週修煉紀錄</span><h2>循序漸進，自有所得</h2></div><span className="week-total">{game.sessions.reduce((sum, session) => sum + session.minutes, 0)} 分鐘</span></div><div className="week-bars">{['一', '二', '三', '四', '五', '六', '日'].map((day, index) => { const height = [45, 72, 32, 88, 62, 18, 0][index]; return <div className="week-bar" key={day}><div className="bar-track"><span style={{ height: `${height}%` }} /></div><small>{day}</small></div> })}</div><div className="study-legend"><span><i className="legend-dot mint" />專注時間</span><span>目標 {game.dailyGoal} 分鐘／日</span></div></section><section className="card task-card"><div className="card-heading"><div><span className="eyebrow">修煉功課</span><h2>今日任務</h2></div><button className="text-button" onClick={() => setShowAddSubject(!showAddSubject)}>＋ 自訂科目</button></div>{showAddSubject && <div className="add-subject-form"><input value={newSubjectName} onChange={(event) => setNewSubjectName(event.target.value)} placeholder="例如：日文、吉他、閱讀" maxLength={18} /><div><select value={newSubjectDifficulty} onChange={(event) => setNewSubjectDifficulty(event.target.value as SubjectDifficulty)}>{difficultyOptions.map((item) => <option key={item}>{item}</option>)}</select><select value={newSubjectQuality} onChange={(event) => setNewSubjectQuality(event.target.value as SubjectQuality)}>{qualityOptions.map((item) => <option key={item}>{item}</option>)}</select><button className="soft-button" onClick={addSubject}>加入科目</button></div><small>難度與品質會影響完成讀書後的修為、靈石獎勵。</small></div>}<div className="filter-row">{filterSubjects.map((item) => <button key={item} className={filter === item ? 'active' : ''} onClick={() => setFilter(item)}>{item}</button>)}</div><div className="task-list">{tasks.map((task) => <button className={`task-item ${task.completed ? 'completed' : ''}`} key={task.id} onClick={() => toggleTask(task.id)}><span className="check-circle">{task.completed ? '✓' : ''}</span><span className="task-copy"><strong>{task.title}</strong><small>{task.subject} · {task.targetMinutes} 分鐘</small></span><span className="task-arrow">→</span></button>)}</div></section><section className="card history-card"><div className="card-heading"><div><span className="eyebrow">最近入定</span><h2>學習紀錄</h2></div><span className="history-count">{game.sessions.length} 次</span></div><div className="history-list">{[...game.sessions].reverse().slice(0, 5).map((session) => <div className="history-item" key={session.id}><span className="history-icon">✧</span><div><strong>{session.subject}專注修煉</strong><small>{session.difficulty} · {session.quality} · {new Date(session.completedAt).toLocaleDateString('zh-TW', { month: 'short', day: 'numeric' })}</small></div><b>+{session.rewardExp ?? session.minutes * 10} 修為</b></div>)}</div></section></div>{showTimer && <div className="modal-backdrop"><div className="timer-modal"><button className="modal-close" onClick={() => setShowTimer(false)}>×</button><StudyTimer initialSnapshot={readStudyTimerSnapshot()} subject={selectedSubject} subjectCatalog={game.subjects} onSubjectChange={setSelectedSubject} onComplete={onComplete} onCancel={() => setShowTimer(false)} /></div></div>}</>
 }
 
 function CultivationView({ game, currentRealm, nextRealm, totalExp, realmIndex, canBreakthrough, onBreakthrough }: { game: GameState; currentRealm: typeof realmData[number]; nextRealm?: typeof realmData[number]; totalExp: number; realmIndex: number; canBreakthrough: boolean; onBreakthrough: () => void }) {
@@ -564,7 +571,7 @@ function StudyView({ game, selectedSubject, setSelectedSubject, showTimer, setSh
       </section>
       <section className="card history-card"><div className="card-heading"><div><span className="eyebrow">最近入定</span><h2>學習紀錄</h2></div><span className="history-count">{game.sessions.length} 次</span></div>{game.sessions.length === 0 ? <div className="history-empty"><span>◌</span><p>完成第一次伴讀後，這裡會保留最近的學習足跡。</p><button className="soft-button" onClick={() => setShowTimer(true)}>開始第一次專注</button></div> : <div className="history-list">{[...game.sessions].reverse().slice(0, 5).map((session) => <div className="history-item" key={session.id}><span className="history-icon">✧</span><div><strong>{session.subject}專注修煉</strong><small>{session.difficulty} · {session.quality} · {new Date(session.completedAt).toLocaleDateString('zh-TW', { month: 'short', day: 'numeric' })}</small></div><b>+{session.rewardExp ?? session.minutes * 10} 修為</b></div>)}</div>}</section>
     </div>
-    {showTimer && <div className="modal-backdrop"><div className="timer-modal"><button className="modal-close" onClick={() => setShowTimer(false)}>×</button><StudyTimer subject={selectedSubject} subjectCatalog={game.subjects} onSubjectChange={setSelectedSubject} onComplete={onComplete} onCancel={() => setShowTimer(false)} /></div></div>}
+    {showTimer && <div className="modal-backdrop"><div className="timer-modal"><button className="modal-close" onClick={() => setShowTimer(false)}>×</button><StudyTimer initialSnapshot={readStudyTimerSnapshot()} subject={selectedSubject} subjectCatalog={game.subjects} onSubjectChange={setSelectedSubject} onComplete={onComplete} onCancel={() => setShowTimer(false)} /></div></div>}
   </>
 }
 

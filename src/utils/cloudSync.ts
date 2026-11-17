@@ -9,6 +9,7 @@ export interface CloudSession {
   refreshToken: string
   userId: string
   email: string
+  expiresAt?: number
 }
 
 export interface CloudMusicSettings {
@@ -78,31 +79,76 @@ async function requestJson<T>(url: string, init: RequestInit, fallback: string):
   const text = await response.text()
   let body: unknown = null
   try { body = text ? JSON.parse(text) : null } catch { body = text }
-  if (!response.ok) throw new Error(getErrorMessage(body, fallback))
+  if (!response.ok) {
+    const error = new Error(getErrorMessage(body, fallback)) as Error & { status?: number }
+    error.status = response.status
+    throw error
+  }
   return body as T
+}
+
+type AuthResponse = { access_token: string; refresh_token?: string; expires_in?: number; user?: { id: string; email?: string } }
+
+function sessionFromAuthResponse(body: AuthResponse, previous: CloudSession, email = previous.email): CloudSession {
+  return {
+    ...previous,
+    accessToken: body.access_token,
+    refreshToken: body.refresh_token ?? previous.refreshToken,
+    email: body.user?.email ?? email,
+    expiresAt: body.expires_in ? Date.now() + body.expires_in * 1000 : previous.expiresAt,
+  }
+}
+
+async function refreshCloudSession(session: CloudSession) {
+  const body = await requestJson<AuthResponse>(
+    `${supabaseUrl}/auth/v1/token?grant_type=refresh_token`,
+    { method: 'POST', headers: { apikey: supabaseAnonKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ refresh_token: session.refreshToken }) },
+    '登入狀態已過期，請重新登入。',
+  )
+  const refreshed = sessionFromAuthResponse(body, session)
+  setCloudSession(refreshed)
+  return refreshed
+}
+
+async function ensureFreshSession(session: CloudSession) {
+  if (session.expiresAt && session.expiresAt > Date.now() + 60_000) return session
+  return refreshCloudSession(session)
+}
+
+async function requestWithSession<T>(session: CloudSession, request: (validSession: CloudSession) => [string, RequestInit], fallback: string) {
+  let validSession = await ensureFreshSession(session)
+  try {
+    const [url, init] = request(validSession)
+    return await requestJson<T>(url, init, fallback)
+  } catch (error) {
+    if (!(error instanceof Error) || (error as Error & { status?: number }).status !== 401) throw error
+    validSession = await refreshCloudSession(validSession)
+    const [url, init] = request(validSession)
+    return requestJson<T>(url, init, fallback)
+  }
 }
 
 export async function signInCloud(email: string, password: string) {
   if (!cloudSyncConfigured) throw new Error('尚未設定雲端同步服務')
-  const body = await requestJson<{ access_token: string; refresh_token: string; user: { id: string; email?: string } }>(
+  const body = await requestJson<AuthResponse & { refresh_token: string; user: { id: string; email?: string } }>(
     `${supabaseUrl}/auth/v1/token?grant_type=password`,
     { method: 'POST', headers: { apikey: supabaseAnonKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) },
     '登入失敗，請確認電子郵件與密碼。',
   )
-  const session: CloudSession = { accessToken: body.access_token, refreshToken: body.refresh_token, userId: body.user.id, email: body.user.email ?? email }
+  const session: CloudSession = { accessToken: body.access_token, refreshToken: body.refresh_token, userId: body.user.id, email: body.user.email ?? email, expiresAt: body.expires_in ? Date.now() + body.expires_in * 1000 : undefined }
   setCloudSession(session)
   return session
 }
 
 export async function signUpCloud(email: string, password: string) {
   if (!cloudSyncConfigured) throw new Error('尚未設定雲端同步服務')
-  const body = await requestJson<{ access_token?: string; refresh_token?: string; user?: { id: string; email?: string } }>(
+  const body = await requestJson<AuthResponse>(
     `${supabaseUrl}/auth/v1/signup`,
     { method: 'POST', headers: { apikey: supabaseAnonKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) },
     '註冊失敗，請確認電子郵件格式。',
   )
   if (!body.access_token || !body.refresh_token || !body.user) return null
-  const session: CloudSession = { accessToken: body.access_token, refreshToken: body.refresh_token, userId: body.user.id, email: body.user.email ?? email }
+  const session: CloudSession = { accessToken: body.access_token, refreshToken: body.refresh_token, userId: body.user.id, email: body.user.email ?? email, expiresAt: body.expires_in ? Date.now() + body.expires_in * 1000 : undefined }
   setCloudSession(session)
   return session
 }
@@ -114,11 +160,7 @@ export function signOutCloud() {
 
 export async function loadCloudSnapshot(session = getCloudSession()) {
   if (!session) return null
-  const rows = await requestJson<Array<{ state: GameState; music_settings?: CloudMusicSettings; updated_at: string }>>(
-    `${supabaseUrl}/rest/v1/cloud_saves?select=state,music_settings,updated_at&user_id=eq.${encodeURIComponent(session.userId)}&limit=1`,
-    { headers: jsonHeaders(session.accessToken) },
-    '無法讀取雲端存檔。',
-  )
+  const rows = await requestWithSession<Array<{ state: GameState; music_settings?: CloudMusicSettings; updated_at: string }>>(session, (validSession) => [`${supabaseUrl}/rest/v1/cloud_saves?select=state,music_settings,updated_at&user_id=eq.${encodeURIComponent(validSession.userId)}&limit=1`, { headers: jsonHeaders(validSession.accessToken) }], '無法讀取雲端存檔。')
   const row = rows[0]
   if (!row) return null
   if (row.music_settings) localStorage.setItem(MUSIC_SETTINGS_KEY, JSON.stringify(row.music_settings))
@@ -127,11 +169,11 @@ export async function loadCloudSnapshot(session = getCloudSession()) {
 
 export async function saveCloudSnapshot(state: GameState, musicSettings?: CloudMusicSettings, session = getCloudSession()) {
   if (!session) return
-  await requestJson(`${supabaseUrl}/rest/v1/cloud_saves?on_conflict=user_id`, {
+  await requestWithSession(session, (validSession) => [`${supabaseUrl}/rest/v1/cloud_saves?on_conflict=user_id`, {
     method: 'POST',
-    headers: { ...jsonHeaders(session.accessToken), Prefer: 'resolution=merge-duplicates,return=minimal' },
-    body: JSON.stringify({ user_id: session.userId, state, music_settings: musicSettings ?? readCloudMusicSettings(), updated_at: new Date().toISOString() }),
-  }, '雲端存檔寫入失敗。')
+    headers: { ...jsonHeaders(validSession.accessToken), Prefer: 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify({ user_id: validSession.userId, state, music_settings: musicSettings ?? readCloudMusicSettings(), updated_at: new Date().toISOString() }),
+  }], '雲端存檔寫入失敗。')
 }
 
 export function readCloudMusicSettings(): CloudMusicSettings | undefined {
@@ -142,23 +184,25 @@ export async function saveCloudMusicSettings(settings: CloudMusicSettings, sessi
   localStorage.setItem(MUSIC_SETTINGS_KEY, JSON.stringify(settings))
   if (!session) return
   const snapshot = await loadCloudSnapshot(session)
-  if (snapshot) await saveCloudSnapshot(snapshot.state, settings, session)
+  const currentSession = getCloudSession() ?? session
+  if (snapshot) await saveCloudSnapshot(snapshot.state, settings, currentSession)
 }
 
 export async function listCloudMusic(session = getCloudSession()) {
   if (!session) return []
-  return requestJson<Array<{ track_id: string; name: string; created_at: number }>>(
-    `${supabaseUrl}/rest/v1/cloud_music?select=track_id,name,created_at&user_id=eq.${encodeURIComponent(session.userId)}&order=created_at.asc`,
-    { headers: jsonHeaders(session.accessToken) },
-    '無法讀取雲端歌單。',
-  ).then((rows) => rows.map((row) => ({ id: row.track_id, name: row.name, createdAt: Number(row.created_at) || Date.now() })))
+  return requestWithSession<Array<{ track_id: string; name: string; created_at: number }>>(session, (validSession) => [`${supabaseUrl}/rest/v1/cloud_music?select=track_id,name,created_at&user_id=eq.${encodeURIComponent(validSession.userId)}&order=created_at.asc`, { headers: jsonHeaders(validSession.accessToken) }], '無法讀取雲端歌單。').then((rows) => rows.map((row) => ({ id: row.track_id, name: row.name, createdAt: Number(row.created_at) || Date.now() })))
 }
 
 export async function deleteCloudMusic(trackId: string, session = getCloudSession()) {
   if (!session) return
-  const path = `${session.userId}/${encodeURIComponent(trackId)}.mp3`
-  const storageResponse = await fetch(`${supabaseUrl}/storage/v1/object/music/${path}`, { method: 'DELETE', headers: { apikey: supabaseAnonKey, Authorization: `Bearer ${session.accessToken}` } })
+  let validSession = await ensureFreshSession(session)
+  const deleteStorage = (current: CloudSession) => fetch(`${supabaseUrl}/storage/v1/object/music/${current.userId}/${encodeURIComponent(trackId)}.mp3`, { method: 'DELETE', headers: { apikey: supabaseAnonKey, Authorization: `Bearer ${current.accessToken}` } })
+  let storageResponse = await deleteStorage(validSession)
+  if (storageResponse.status === 401) {
+    validSession = await refreshCloudSession(validSession)
+    storageResponse = await deleteStorage(validSession)
+  }
   if (!storageResponse.ok && storageResponse.status !== 404) throw new Error('雲端 MP3 刪除失敗。')
-  await requestJson(`${supabaseUrl}/rest/v1/cloud_music?user_id=eq.${encodeURIComponent(session.userId)}&track_id=eq.${encodeURIComponent(trackId)}`, { method: 'DELETE', headers: { ...jsonHeaders(session.accessToken), Prefer: 'return=minimal' } }, '雲端歌單資料刪除失敗。')
+  await requestWithSession(validSession, (current) => [`${supabaseUrl}/rest/v1/cloud_music?user_id=eq.${encodeURIComponent(current.userId)}&track_id=eq.${encodeURIComponent(trackId)}`, { method: 'DELETE', headers: { ...jsonHeaders(current.accessToken), Prefer: 'return=minimal' } }], '雲端歌單資料刪除失敗。')
 }
 
